@@ -1,8 +1,8 @@
 //+------------------------------------------------------------------+
 //|                                         switching martingle.mq5  |
-//|                                      Copyright 2026, Antigravity |
+//|                                           Copyright 2026, Arfian |
 //+------------------------------------------------------------------+
-#property copyright "Copyright 2026, Antigravity"
+#property copyright "Copyright 2026, Arfian"
 #property link      ""
 #property version   "1.00"
 #property strict
@@ -13,15 +13,18 @@ CTrade trade;
 //--- Input Parameters
 input double InpLossPoints = 500.0;        // Jarak Loss Switch/Martingale (Points)
 input double InpTargetPoints = 500.0;      // Target Profit Posisi 1/Awal (Points)
-input double InpTargetBEPPoints = 300.0;   // Target Profit setelah BEP (Points)
+input double InpTargetBEPPoints = 300.0;   // Target Profit setelah BEP 1 (Points)
+input double InpTargetBEP2Points = 150.0;  // Target Profit setelah BEP 2 (Points)
+input int InpBEP2ActivationPos = 5;        // Aktifkan BEP 2 mulai posisi ke-
 input double InpLotMultiplier = 2.0;       // Pengali Lot Martingale
-input int InpMaxPositions = 5;             // Batas Maksimal Posisi Terbuka
+input int InpMaxPositions = 8;             // Batas Maksimal Posisi Terbuka
 input int InpSnRPeriod = 50;               // Periode Candle Support & Resistance
 input ulong InpMagic = 99999;              // EA Magic Number
 
 //--- Global Variables
 double point_value;
 datetime delayUntil = 0; // Variabel keamanan anti-bentrok
+bool isClosingAll = false; // Flag mode karantina sapu bersih
 
 // Struct untuk menyimpan dan mengurutkan data posisi
 struct PosData {
@@ -43,6 +46,47 @@ double NormalizeVolume(double vol) {
     if (normVol > maxVol) normVol = maxVol;
     return normVol;
 }
+
+//+------------------------------------------------------------------+
+//| Asynchronous Helper Functions                                    |
+//+------------------------------------------------------------------+
+void ClosePositionAsync(ulong ticket)
+  {
+   if(!PositionSelectByTicket(ticket)) return;
+   
+   MqlTradeRequest request={0};
+   MqlTradeResult result={0};
+   
+   request.action    = TRADE_ACTION_DEAL;
+   request.position  = ticket;
+   request.symbol    = PositionGetString(POSITION_SYMBOL);
+   request.volume    = PositionGetDouble(POSITION_VOLUME);
+   request.deviation = 50;
+   
+   if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+     {
+      request.price = SymbolInfoDouble(request.symbol, SYMBOL_BID);
+      request.type  = ORDER_TYPE_SELL;
+     }
+   else
+     {
+      request.price = SymbolInfoDouble(request.symbol, SYMBOL_ASK);
+      request.type  = ORDER_TYPE_BUY;
+     }
+     
+   OrderSendAsync(request, result);
+  }
+
+void DeleteOrderAsync(ulong ticket)
+  {
+   MqlTradeRequest request={0};
+   MqlTradeResult result={0};
+   
+   request.action = TRADE_ACTION_REMOVE;
+   request.order  = ticket;
+   
+   OrderSendAsync(request, result);
+  }
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -69,6 +113,44 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   // --- Cek status Karantina (Sapu Bersih Paksa) ---
+   if(isClosingAll)
+     {
+      int sisaOrder = 0;
+      int sisaPosisi = 0;
+      
+      for(int i = OrdersTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = OrderGetTicket(i);
+         if(OrderGetString(ORDER_SYMBOL) == _Symbol && OrderGetInteger(ORDER_MAGIC) == InpMagic)
+           {
+            sisaOrder++;
+            DeleteOrderAsync(ticket);
+           }
+        }
+        
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol)
+           {
+            sisaPosisi++;
+            ClosePositionAsync(ticket);
+           }
+        }
+        
+      if(sisaOrder == 0 && sisaPosisi == 0)
+        {
+         isClosingAll = false;
+         Print("Karantina Close All selesai 100%. Robot kembali Standby.");
+        }
+      else
+        {
+         // JANGAN lanjut menjalankan strategi ke bawah jika belum bersih 100%
+         return; 
+        }
+     }
+     
    int total_positions = PositionsTotal();
    int total_orders = OrdersTotal();
    
@@ -198,7 +280,8 @@ void OnTick()
       // Kalkulasi Target Uang BEP (Break Even + Points) untuk posisi > 1
       double targetMoneyBEP = 0;
       double netLot = MathAbs(totalBuyLot - totalSellLot); // Cari selisih murni (volume dominan)
-      if(tickSize > 0) targetMoneyBEP = (InpTargetBEPPoints * point_value / tickSize) * tickValue * netLot;
+      double currentBEPPoints = (myPositions >= InpBEP2ActivationPos) ? InpTargetBEP2Points : InpTargetBEPPoints;
+      if(tickSize > 0) targetMoneyBEP = (currentBEPPoints * point_value / tickSize) * tickValue * netLot;
       
       bool hitTarget = false;
       
@@ -220,27 +303,26 @@ void OnTick()
         {
          Print("Target profit (", myPositions == 1 ? "Global" : "BEP Points", ") tercapai! Menjalankan Auto Close All...");
          
-         delayUntil = TimeCurrent() + 5; 
+         delayUntil = TimeCurrent() + InpMaxPositions + 5; 
+         isClosingAll = true; // Aktifkan mode karantina paksa
          
-         // Batal jaring pending
+         // Batal jaring pending secara Asinkron
          for(int i = OrdersTotal() - 1; i >= 0; i--)
            {
             ulong ticket = OrderGetTicket(i);
              if(OrderGetString(ORDER_SYMBOL) == _Symbol && OrderGetInteger(ORDER_MAGIC) == InpMagic)
                {
-                if(!trade.OrderDelete(ticket))
-                   Print("Error delete pending order on CloseAll: ", GetLastError());
+                DeleteOrderAsync(ticket);
                }
            }
            
-         // Tutup posisi aktif
+         // Tutup posisi aktif secara Asinkron
          for(int i = PositionsTotal() - 1; i >= 0; i--)
            {
             ulong ticket = PositionGetTicket(i);
              if(PositionGetString(POSITION_SYMBOL) == _Symbol)
                {
-                if(!trade.PositionClose(ticket))
-                   Print("Error close position on CloseAll: ", GetLastError());
+                ClosePositionAsync(ticket);
                }
            }
            
@@ -335,9 +417,12 @@ void OnTick()
        }
      else if(myPositions > 1) 
        {
-        tpStatus = "BEP Close All (" + DoubleToString(InpTargetBEPPoints, 0) + " Points)";
+        double currentBEPPoints = (myPositions >= InpBEP2ActivationPos) ? InpTargetBEP2Points : InpTargetBEPPoints;
+        string bepLabel = (myPositions >= InpBEP2ActivationPos) ? "BEP 2 Close All (" : "BEP 1 Close All (";
+        tpStatus = bepLabel + DoubleToString(currentBEPPoints, 0) + " Points)";
+        
         double netLot = MathAbs(totalBuyLot - totalSellLot);
-        if(tickSize > 0) targetDisplayMoney = (InpTargetBEPPoints * point_value / tickSize) * tickValue * netLot;
+        if(tickSize > 0) targetDisplayMoney = (currentBEPPoints * point_value / tickSize) * tickValue * netLot;
        }
      
      string commentText = "\n== PENDING SWITCH MARTINGALE ==\n\n" +
