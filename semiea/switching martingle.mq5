@@ -48,50 +48,62 @@ double NormalizeVolume(double vol) {
 }
 
 //+------------------------------------------------------------------+
-//| Asynchronous Helper Functions                                    |
+//| CloseBy Helper Function (Tutup Saling Silang)                    |
 //+------------------------------------------------------------------+
-void ClosePositionAsync(ulong ticket)
+void CloseAllPositions()
   {
-   if(!PositionSelectByTicket(ticket)) return;
-   
-   MqlTradeRequest request;
-   MqlTradeResult result;
-   ZeroMemory(request);
-   ZeroMemory(result);
-   
-   request.action    = TRADE_ACTION_DEAL;
-   request.position  = ticket;
-   request.symbol    = PositionGetString(POSITION_SYMBOL);
-   request.volume    = PositionGetDouble(POSITION_VOLUME);
-   request.deviation = 50;
-   
-   if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+   // 1. Batalkan semua pending order
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
-      request.price = SymbolInfoDouble(request.symbol, SYMBOL_BID);
-      request.type  = ORDER_TYPE_SELL;
-     }
-   else
-     {
-      request.price = SymbolInfoDouble(request.symbol, SYMBOL_ASK);
-      request.type  = ORDER_TYPE_BUY;
+      ulong ticket = OrderGetTicket(i);
+      if(OrderGetString(ORDER_SYMBOL) == _Symbol && OrderGetInteger(ORDER_MAGIC) == InpMagic)
+        {
+         trade.OrderDelete(ticket);
+        }
      }
      
-   if(!OrderSendAsync(request, result))
-      Print("Async close error: ", GetLastError());
-  }
-
-void DeleteOrderAsync(ulong ticket)
-  {
-   MqlTradeRequest request;
-   MqlTradeResult result;
-   ZeroMemory(request);
-   ZeroMemory(result);
-   
-   request.action = TRADE_ACTION_REMOVE;
-   request.order  = ticket;
-   
-   if(!OrderSendAsync(request, result))
-      Print("Async delete error: ", GetLastError());
+   // 2. Tutup Saling Silang (Close By) untuk menghemat spread & slippage
+   while(true)
+     {
+      ulong buyTicket = 0;
+      ulong sellTicket = 0;
+      
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol)
+           {
+            long type = PositionGetInteger(POSITION_TYPE);
+            if(type == POSITION_TYPE_BUY)
+               buyTicket = ticket;
+            else if(type == POSITION_TYPE_SELL)
+               sellTicket = ticket;
+           }
+        }
+        
+      if(buyTicket > 0 && sellTicket > 0)
+        {
+         if(!trade.PositionCloseBy(buyTicket, sellTicket))
+           {
+            Print("CloseBy gagal (mungkin tidak didukung). Fallback ke penutupan normal. Error: ", GetLastError());
+            break; 
+           }
+        }
+      else
+        {
+         break; // Tidak ada pasangan lagi yang bisa disilang
+        }
+     }
+     
+   // 3. Tutup sisa posisi (normal close) - misal jika hanya tersisa Buy saja
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol)
+        {
+         trade.PositionClose(ticket);
+        }
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -122,30 +134,22 @@ void OnTick()
    // --- Cek status Karantina (Sapu Bersih Paksa) ---
    if(isClosingAll)
      {
-      int sisaOrder = 0;
-      int sisaPosisi = 0;
+      CloseAllPositions();
       
+      int sisa = 0;
       for(int i = OrdersTotal() - 1; i >= 0; i--)
         {
-         ulong ticket = OrderGetTicket(i);
          if(OrderGetString(ORDER_SYMBOL) == _Symbol && OrderGetInteger(ORDER_MAGIC) == InpMagic)
-           {
-            sisaOrder++;
-            DeleteOrderAsync(ticket);
-           }
+            sisa++;
         }
         
       for(int i = PositionsTotal() - 1; i >= 0; i--)
         {
-         ulong ticket = PositionGetTicket(i);
          if(PositionGetString(POSITION_SYMBOL) == _Symbol)
-           {
-            sisaPosisi++;
-            ClosePositionAsync(ticket);
-           }
+            sisa++;
         }
         
-      if(sisaOrder == 0 && sisaPosisi == 0)
+      if(sisa == 0)
         {
          isClosingAll = false;
          Print("Karantina Close All selesai 100%. Robot kembali Standby.");
@@ -312,25 +316,8 @@ void OnTick()
          delayUntil = TimeCurrent() + InpMaxPositions + 5; 
          isClosingAll = true; // Aktifkan mode karantina paksa
          
-         // Batal jaring pending secara Asinkron
-         for(int i = OrdersTotal() - 1; i >= 0; i--)
-           {
-            ulong ticket = OrderGetTicket(i);
-             if(OrderGetString(ORDER_SYMBOL) == _Symbol && OrderGetInteger(ORDER_MAGIC) == InpMagic)
-               {
-                DeleteOrderAsync(ticket);
-               }
-           }
-           
-         // Tutup posisi aktif secara Asinkron
-         for(int i = PositionsTotal() - 1; i >= 0; i--)
-           {
-            ulong ticket = PositionGetTicket(i);
-             if(PositionGetString(POSITION_SYMBOL) == _Symbol)
-               {
-                ClosePositionAsync(ticket);
-               }
-           }
+         // Eksekusi penutupan dengan saling silang (Close By)
+         CloseAllPositions();
            
          return; 
         }
