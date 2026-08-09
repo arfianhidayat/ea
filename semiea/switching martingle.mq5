@@ -54,8 +54,10 @@ void ClosePositionAsync(ulong ticket)
   {
    if(!PositionSelectByTicket(ticket)) return;
    
-   MqlTradeRequest request={0};
-   MqlTradeResult result={0};
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
    
    request.action    = TRADE_ACTION_DEAL;
    request.position  = ticket;
@@ -74,18 +76,22 @@ void ClosePositionAsync(ulong ticket)
       request.type  = ORDER_TYPE_BUY;
      }
      
-   OrderSendAsync(request, result);
+   if(!OrderSendAsync(request, result))
+      Print("Async close error: ", GetLastError());
   }
 
 void DeleteOrderAsync(ulong ticket)
   {
-   MqlTradeRequest request={0};
-   MqlTradeResult result={0};
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
    
    request.action = TRADE_ACTION_REMOVE;
    request.order  = ticket;
    
-   OrderSendAsync(request, result);
+   if(!OrderSendAsync(request, result))
+      Print("Async delete error: ", GetLastError());
   }
 
 //+------------------------------------------------------------------+
@@ -174,7 +180,7 @@ void OnTick()
       ulong ticket = PositionGetTicket(i);
       if(PositionGetString(POSITION_SYMBOL) == _Symbol)
         {
-         double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP) + PositionGetDouble(POSITION_COMMISSION);
+         double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
          totalProfitMoney += profit;
          
          posArr[myPositions].ticket = ticket;
