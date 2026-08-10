@@ -4,15 +4,15 @@
 //+------------------------------------------------------------------+
 #property copyright "Strategi Trading"
 #property link      "https://www.mql5.com"
-#property version   "1.00"
+#property version   "1.10"
 
 #include <Trade\Trade.mqh>
 
 //--- Input Parameters ---
 input double   InpGridDistance   = 250;      // Jarak Grid (Points, cth: 250 = 25 pips)
 input double   InpLotMultiplier  = 2.0;      // Multiplier Martingale (cth: 2.0)
-input double   InpTargetProfit   = 10.0;     // Target Profit Basket (dalam USD/Currency)
-input ulong    InpMagicNumber    = 88888;    // Magic Number EA (untuk order lanjutan)
+input int      InpTargetPoints   = 100;      // Target Profit Basket (Points, cth: 100 = 10 pips)
+input ulong    InpMagicNumber    = 88888;    // Magic Number EA
 
 CTrade trade;
 
@@ -33,8 +33,11 @@ void OnTick()
    int buy_count = 0;
    int sell_count = 0;
    
-   double total_buy_profit = 0;
-   double total_sell_profit = 0;
+   double sum_buy_volume = 0;
+   double sum_buy_value = 0;
+   
+   double sum_sell_volume = 0;
+   double sum_sell_value = 0;
    
    double last_buy_price = 0;
    double last_sell_price = 0;
@@ -59,14 +62,14 @@ void OnTick()
             long type = PositionGetInteger(POSITION_TYPE);
             double price = PositionGetDouble(POSITION_PRICE_OPEN);
             double vol = PositionGetDouble(POSITION_VOLUME);
-            // Menghitung profit + swap agar akurat
-            double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
             datetime time = (datetime)PositionGetInteger(POSITION_TIME);
             
             if(type == POSITION_TYPE_BUY)
               {
                buy_count++;
-               total_buy_profit += profit;
+               sum_buy_volume += vol;
+               sum_buy_value += (price * vol); // Untuk perhitungan harga rata-rata (BEP)
+               
                // Mencari harga dan lot dari posisi Buy TERAKHIR dibuka
                if(time > latest_buy_time)
                  {
@@ -78,7 +81,9 @@ void OnTick()
             else if(type == POSITION_TYPE_SELL)
               {
                sell_count++;
-               total_sell_profit += profit;
+               sum_sell_volume += vol;
+               sum_sell_value += (price * vol); // Untuk perhitungan harga rata-rata (BEP)
+               
                // Mencari harga dan lot dari posisi Sell TERAKHIR dibuka
                if(time > latest_sell_time)
                  {
@@ -91,22 +96,38 @@ void OnTick()
         }
      }
      
-   // 2. Eksekusi Take Profit (Basket Close)
-   if(buy_count > 0 && total_buy_profit >= InpTargetProfit)
+   // 2. Eksekusi Take Profit Berdasarkan Poin (Basket Close)
+   // LOGIKA BUY
+   if(buy_count > 0)
      {
-      CloseAll(POSITION_TYPE_BUY);
-      buy_count = 0; // Reset setelah ditutup
+      double bep_buy = sum_buy_value / sum_buy_volume; // Harga rata-rata BEP
+      double target_price_buy = bep_buy + (InpTargetPoints * _Point);
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID); // Penutupan posisi Buy menggunakan harga Bid
+      
+      if(bid >= target_price_buy)
+        {
+         CloseAll(POSITION_TYPE_BUY);
+         buy_count = 0; // Reset
+        }
      }
      
-   if(sell_count > 0 && total_sell_profit >= InpTargetProfit)
+   // LOGIKA SELL
+   if(sell_count > 0)
      {
-      CloseAll(POSITION_TYPE_SELL);
-      sell_count = 0; // Reset setelah ditutup
+      double bep_sell = sum_sell_value / sum_sell_volume; // Harga rata-rata BEP
+      double target_price_sell = bep_sell - (InpTargetPoints * _Point);
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK); // Penutupan posisi Sell menggunakan harga Ask
+      
+      if(ask <= target_price_sell)
+        {
+         CloseAll(POSITION_TYPE_SELL);
+         sell_count = 0; // Reset
+        }
      }
      
    // 3. Eksekusi Pembukaan Posisi Baru (Martingale Grid)
    // BUY MARTINGALE
-   if(buy_count > 0 && total_buy_profit < InpTargetProfit)
+   if(buy_count > 0)
      {
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       // Jika harga turun melampaui jarak grid dari buy terakhir
@@ -118,7 +139,7 @@ void OnTick()
      }
      
    // SELL MARTINGALE
-   if(sell_count > 0 && total_sell_profit < InpTargetProfit)
+   if(sell_count > 0)
      {
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       // Jika harga naik melampaui jarak grid dari sell terakhir
@@ -161,7 +182,6 @@ double CalculateLot(double calculated_lot)
    double max_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    
-   // Normalisasi lot agar tidak ditolak broker (misal: 0.165 jadi 0.16)
    double final_lot = MathRound(calculated_lot / step) * step;
    
    if(final_lot < min_lot) final_lot = min_lot;
