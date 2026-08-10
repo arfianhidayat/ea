@@ -14,7 +14,6 @@
 
 input group "--- General Settings ---"
 input ulong    InpMagicNumber          = 123456;     // Magic Number (0 for manual trades)
-input double   InpMaxSpreadPips        = 5.0;        // Max Spread (pips)
 
 input group "--- Averaging & Martingale ---"
 input double   InpAveragingPips        = 10.0;       // Jarak Minimal Averaging (pips)
@@ -161,23 +160,10 @@ void OnTick()
    ManageClose(countBuy, countSell, avgBuyPrice, avgSellPrice, pipSize);
    
    // Process Averaging
-   double spreadPips = (m_symbol.Ask() - m_symbol.Bid()) / pipSize;
-   if(spreadPips <= InpMaxSpreadPips)
-     {
-      if(countBuy > 0)
-         ProcessAveraging(POSITION_TYPE_BUY, lastBuyPrice, lastBuyLot, pipSize, countBuy);
-      if(countSell > 0)
-         ProcessAveraging(POSITION_TYPE_SELL, lastSellPrice, lastSellLot, pipSize, countSell);
-     }
-   else
-     {
-      static datetime lastSpreadWarn = 0;
-      if(TimeCurrent() - lastSpreadWarn >= 60)
-        {
-         PrintFormat("Peringatan: Spread saat ini (%.1f pips) melebihi InpMaxSpreadPips (%.1f pips). Averaging ditunda.", spreadPips, InpMaxSpreadPips);
-         lastSpreadWarn = TimeCurrent();
-        }
-     }
+   if(countBuy > 0)
+      ProcessAveraging(POSITION_TYPE_BUY, lastBuyPrice, lastBuyLot, pipSize, countBuy);
+   if(countSell > 0)
+      ProcessAveraging(POSITION_TYPE_SELL, lastSellPrice, lastSellLot, pipSize, countSell);
   }
 
 //+------------------------------------------------------------------+
