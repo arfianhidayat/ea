@@ -4,14 +4,15 @@
 //+------------------------------------------------------------------+
 #property copyright "Strategi Trading"
 #property link      "https://www.mql5.com"
-#property version   "1.10"
+#property version   "1.20"
 
 #include <Trade\Trade.mqh>
 
 //--- Input Parameters ---
-input double   InpGridDistance   = 250;      // Jarak Grid (Points, cth: 250 = 25 pips)
+input double   InpGridDistance   = 100;      // Jarak Grid (Input 100 = Jarak Harga 10.00)
+input double   InpTargetPoints   = 100;      // Target Profit (Input 100 = Jarak Harga 10.00)
+input double   InpPriceMultiplier= 0.1;      // Faktor Pengali Jarak (100 x 0.1 = 10.00)
 input double   InpLotMultiplier  = 2.0;      // Multiplier Martingale (cth: 2.0)
-input int      InpTargetPoints   = 100;      // Target Profit Basket (Points, cth: 100 = 10 pips)
 input ulong    InpMagicNumber    = 88888;    // Magic Number EA
 
 CTrade trade;
@@ -68,9 +69,8 @@ void OnTick()
               {
                buy_count++;
                sum_buy_volume += vol;
-               sum_buy_value += (price * vol); // Untuk perhitungan harga rata-rata (BEP)
+               sum_buy_value += (price * vol); 
                
-               // Mencari harga dan lot dari posisi Buy TERAKHIR dibuka
                if(time > latest_buy_time)
                  {
                   latest_buy_time = time;
@@ -82,9 +82,8 @@ void OnTick()
               {
                sell_count++;
                sum_sell_volume += vol;
-               sum_sell_value += (price * vol); // Untuk perhitungan harga rata-rata (BEP)
+               sum_sell_value += (price * vol); 
                
-               // Mencari harga dan lot dari posisi Sell TERAKHIR dibuka
                if(time > latest_sell_time)
                  {
                   latest_sell_time = time;
@@ -96,32 +95,37 @@ void OnTick()
         }
      }
      
-   // 2. Eksekusi Take Profit Berdasarkan Poin (Basket Close)
+   // --- PERHITUNGAN JARAK ABSOLUT (Sesuai Skenario Anda) ---
+   // Jika InpTargetPoints = 100 dan Multiplier = 0.1, maka jarak_riil = 10.00
+   double target_distance_real = InpTargetPoints * InpPriceMultiplier; 
+   double grid_distance_real   = InpGridDistance * InpPriceMultiplier;
+     
+   // 2. Eksekusi Take Profit (Basket Close)
    // LOGIKA BUY
    if(buy_count > 0)
      {
-      double bep_buy = sum_buy_value / sum_buy_volume; // Harga rata-rata BEP
-      double target_price_buy = bep_buy + (InpTargetPoints * _Point);
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID); // Penutupan posisi Buy menggunakan harga Bid
+      double bep_buy = sum_buy_value / sum_buy_volume; 
+      double target_price_buy = bep_buy + target_distance_real; 
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID); 
       
       if(bid >= target_price_buy)
         {
          CloseAll(POSITION_TYPE_BUY);
-         buy_count = 0; // Reset
+         buy_count = 0; 
         }
      }
      
    // LOGIKA SELL
    if(sell_count > 0)
      {
-      double bep_sell = sum_sell_value / sum_sell_volume; // Harga rata-rata BEP
-      double target_price_sell = bep_sell - (InpTargetPoints * _Point);
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK); // Penutupan posisi Sell menggunakan harga Ask
+      double bep_sell = sum_sell_value / sum_sell_volume; 
+      double target_price_sell = bep_sell - target_distance_real; 
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK); 
       
       if(ask <= target_price_sell)
         {
          CloseAll(POSITION_TYPE_SELL);
-         sell_count = 0; // Reset
+         sell_count = 0; 
         }
      }
      
@@ -130,8 +134,8 @@ void OnTick()
    if(buy_count > 0)
      {
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      // Jika harga turun melampaui jarak grid dari buy terakhir
-      if(ask <= last_buy_price - (InpGridDistance * _Point))
+      // Jika harga turun melampaui grid_distance_real (misal 10.00 poin) dari buy terakhir
+      if(ask <= last_buy_price - grid_distance_real)
         {
          double new_lot = CalculateLot(last_buy_lot * InpLotMultiplier);
          trade.Buy(new_lot, _Symbol, ask, 0, 0, "Auto Averaging Buy");
@@ -142,8 +146,8 @@ void OnTick()
    if(sell_count > 0)
      {
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      // Jika harga naik melampaui jarak grid dari sell terakhir
-      if(bid >= last_sell_price + (InpGridDistance * _Point))
+      // Jika harga naik melampaui grid_distance_real (misal 10.00 poin) dari sell terakhir
+      if(bid >= last_sell_price + grid_distance_real)
         {
          double new_lot = CalculateLot(last_sell_lot * InpLotMultiplier);
          trade.Sell(new_lot, _Symbol, bid, 0, 0, "Auto Averaging Sell");
@@ -174,7 +178,7 @@ void CloseAll(long pos_type)
   }
 
 //+------------------------------------------------------------------+
-//| Fungsi Kalkulasi Lot (Menyesuaikan aturan broker)                |
+//| Fungsi Kalkulasi Lot                                             |
 //+------------------------------------------------------------------+
 double CalculateLot(double calculated_lot)
   {
