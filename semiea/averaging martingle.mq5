@@ -1,18 +1,17 @@
 //+------------------------------------------------------------------+
 //|                                     SemiAuto_Martingale_Grid.mq5 |
-//|                                     Versi 1.30 (Diagnostic)      |
+//|                                     Versi 2.0 (Direct Price)     |
 //+------------------------------------------------------------------+
 #property copyright "Strategi Trading"
 #property link      "https://www.mql5.com"
-#property version   "1.30"
+#property version   "2.00"
 
 #include <Trade\Trade.mqh>
 
 //--- Input Parameters ---
-input double   InpGridDistance   = 100;      // Jarak Grid (Input 100 = Jarak 10.00)
-input double   InpTargetPoints   = 100;      // Target Profit (Input 100 = Jarak 10.00)
-input double   InpPriceMultiplier= 0.1;      // Faktor Pengali (100 x 0.1 = 10.00)
-input double   InpLotMultiplier  = 2.0;      // Multiplier Martingale
+input double   InpGridDistance   = 5.0;      // Jarak Buka Posisi (Contoh: 5.0)
+input double   InpTargetProfit   = 2.0;      // Target Profit dr BEP (Contoh: 2.0)
+input double   InpLotMultiplier  = 2.0;      // Multiplier Martingale (Contoh: 2.0)
 input ulong    InpMagicNumber    = 88888;    // Magic Number EA
 
 CTrade trade;
@@ -20,7 +19,7 @@ CTrade trade;
 int OnInit()
   {
    trade.SetExpertMagicNumber(InpMagicNumber);
-   trade.SetDeviationInPoints(50); // Tambahan toleransi slippage agar broker tidak reject
+   trade.SetDeviationInPoints(50); // Toleransi slippage
    return(INIT_SUCCEEDED);
   }
 
@@ -65,42 +64,39 @@ void OnTick()
         }
      }
      
-   double target_distance_real = InpTargetPoints * InpPriceMultiplier; 
-   double grid_distance_real   = InpGridDistance * InpPriceMultiplier;
+   // --- DASHBOARD DIAGNOSTIK ---
+   string dashboard = "=== EA MARTINGALE (DIRECT PRICE) ===\n";
+   dashboard += "Jarak Averaging Disetel: " + DoubleToString(InpGridDistance, 2) + "\n";
+   dashboard += "Target Profit (TP) Disetel: " + DoubleToString(InpTargetProfit, 2) + "\n\n";
    
-   // --- DASHBOARD DIAGNOSTIK UNTUK TRADER ---
-   string dashboard = "=== DIAGNOSTIK EA MARTINGALE ===\n";
-   dashboard += "Jarak Grid Disetel: " + DoubleToString(grid_distance_real, 2) + "\n";
-   dashboard += "Total Posisi Sell: " + IntegerToString(sell_count) + "\n";
-   
-   // 2. Eksekusi & Update Dashboard Sell
+   // 2. Eksekusi SELL
    if(sell_count > 0)
      {
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID); 
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK); 
       
       double bep_sell = sum_sell_value / sum_sell_volume; 
-      double target_price_sell = bep_sell - target_distance_real; 
-      double next_sell_price = last_sell_price + grid_distance_real;
+      double target_price_sell = bep_sell - InpTargetProfit; 
+      double next_sell_price = last_sell_price + InpGridDistance;
       double current_distance = bid - last_sell_price;
       
-      dashboard += "Harga Terakhir Buka (Sell): " + DoubleToString(last_sell_price, 3) + "\n";
-      dashboard += "Harga Averaging Berikutnya: " + DoubleToString(next_sell_price, 3) + "\n";
-      dashboard += "Harga Market (Bid) Saat Ini: " + DoubleToString(bid, 3) + "\n";
-      dashboard += "Jarak Floating Saat Ini: " + DoubleToString(current_distance, 3) + " / " + DoubleToString(grid_distance_real, 2) + "\n";
-      dashboard += "Target Basket Close (TP): " + DoubleToString(target_price_sell, 3) + "\n";
+      dashboard += "--- STATUS SELL ---\n";
+      dashboard += "Total Posisi: " + IntegerToString(sell_count) + "\n";
+      dashboard += "Harga Open Terakhir: " + DoubleToString(last_sell_price, 3) + "\n";
+      dashboard += "Harga Buka Selanjutnya: " + DoubleToString(next_sell_price, 3) + "\n";
+      dashboard += "Harga Market Saat Ini: " + DoubleToString(bid, 3) + "\n";
+      dashboard += "Jarak Floating Saat Ini: " + DoubleToString(current_distance, 3) + "\n";
+      dashboard += "Harga BEP Rata-rata: " + DoubleToString(bep_sell, 3) + "\n";
+      dashboard += "Target Close (TP) di Harga: " + DoubleToString(target_price_sell, 3) + "\n";
       
-      // Martingale Eksekusi
+      // Buka Posisi Martingale Baru (Sesuai Logika 1000 ke 1005)
       if(bid >= next_sell_price)
         {
          double new_lot = CalculateLot(last_sell_lot * InpLotMultiplier);
-         if(!trade.Sell(new_lot, _Symbol, bid, 0, 0, "Auto Averaging Sell"))
-           {
-            Print("[-] GAGAL BUKA SELL! Error Broker: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
-           }
+         trade.Sell(new_lot, _Symbol, bid, 0, 0, "Auto Averaging Sell");
         }
         
-      // TP Eksekusi
+      // Tutup Semua Posisi Saat Harga Turun ke Target (Sesuai Logika Take Profit)
       if(ask <= target_price_sell)
         {
          CloseAll(POSITION_TYPE_SELL);
@@ -108,7 +104,41 @@ void OnTick()
         }
      }
      
-   // Tampilkan di Chart
+   // 3. Eksekusi BUY (Kebalikan dari Sell)
+   if(buy_count > 0)
+     {
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID); 
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK); 
+      
+      double bep_buy = sum_buy_value / sum_buy_volume; 
+      double target_price_buy = bep_buy + InpTargetProfit; 
+      double next_buy_price = last_buy_price - InpGridDistance;
+      double current_distance = last_buy_price - ask;
+      
+      dashboard += "--- STATUS BUY ---\n";
+      dashboard += "Total Posisi: " + IntegerToString(buy_count) + "\n";
+      dashboard += "Harga Open Terakhir: " + DoubleToString(last_buy_price, 3) + "\n";
+      dashboard += "Harga Buka Selanjutnya: " + DoubleToString(next_buy_price, 3) + "\n";
+      dashboard += "Harga Market Saat Ini: " + DoubleToString(ask, 3) + "\n";
+      dashboard += "Jarak Floating Saat Ini: " + DoubleToString(current_distance, 3) + "\n";
+      dashboard += "Harga BEP Rata-rata: " + DoubleToString(bep_buy, 3) + "\n";
+      dashboard += "Target Close (TP) di Harga: " + DoubleToString(target_price_buy, 3) + "\n";
+      
+      // Buka Posisi Martingale Baru
+      if(ask <= next_buy_price)
+        {
+         double new_lot = CalculateLot(last_buy_lot * InpLotMultiplier);
+         trade.Buy(new_lot, _Symbol, ask, 0, 0, "Auto Averaging Buy");
+        }
+        
+      // Tutup Semua Posisi Saat Harga Naik ke Target
+      if(bid >= target_price_buy)
+        {
+         CloseAll(POSITION_TYPE_BUY);
+         buy_count = 0; 
+        }
+     }
+     
    Comment(dashboard);
   }
 
