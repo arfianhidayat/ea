@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                         Auto_Martingale_Grid.mq5 |
-//|                                         Versi 3.3 (Fast Scalp)   |
+//|                                         Versi 3.4 (SnR Filter)   |
 //+------------------------------------------------------------------+
 #property copyright "Strategi Trading"
 #property link      "https://www.mql5.com"
-#property version   "3.30"
+#property version   "3.40"
 
 #include <Trade\Trade.mqh>
 
@@ -26,6 +26,9 @@ input string   InpEropaStart         = "15:30";  // Mulai Sesi Eropa (WIB)
 input string   InpEropaEnd           = "17:30";  // Akhir Sesi Eropa (WIB)
 input string   InpUSStart            = "22:30";  // Mulai Sesi Amerika (WIB)
 input string   InpUSEnd              = "01:30";  // Akhir Sesi Amerika (WIB)
+
+input group "=== SETTING SUPPORT & RESISTANCE ==="
+input int      InpSnRPeriod          = 50;       // Periode Candle untuk Cek SnR
 
 CTrade trade;
 
@@ -98,26 +101,41 @@ void OnTick()
      }
      
    // ==========================================
-   // 2. LOGIKA OPEN POSISI AWAL (DENGAN FILTER WIB)
+   // 2. LOGIKA OPEN POSISI AWAL (FILTER WIB & SnR)
    // ==========================================
    bool is_trading_time = IsTradingTime();
    
-   // Jika tidak ada posisi SELL, DAN sedang dalam Sesi Trading, buka SELL baru
+   // Dapatkan Nilai Support dan Resistance saat ini
+   double current_support = GetSupport(InpSnRPeriod);
+   double current_resistance = GetResistance(InpSnRPeriod);
+   
+   // Hitung Jarak Aman (Harga Syarat)
+   double safe_buy_price = current_support + (2.0 * InpGridDistance);
+   double safe_sell_price = current_resistance - (2.0 * InpGridDistance);
+   
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   // Jika tidak ada posisi SELL, DAN sedang dalam Sesi Trading, DAN harga memenuhi syarat SnR
    if(sell_count == 0 && is_trading_time)
      {
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double start_lot = CalculateLot(InpInitialLot);
-      trade.Sell(start_lot, _Symbol, bid, 0, 0, "First Auto Sell");
-      sell_count++; 
+      if(bid < safe_sell_price)
+        {
+         double start_lot = CalculateLot(InpInitialLot);
+         trade.Sell(start_lot, _Symbol, bid, 0, 0, "First Auto Sell");
+         sell_count++; 
+        }
      }
      
-   // Jika tidak ada posisi BUY, DAN sedang dalam Sesi Trading, buka BUY baru
+   // Jika tidak ada posisi BUY, DAN sedang dalam Sesi Trading, DAN harga memenuhi syarat SnR
    if(buy_count == 0 && is_trading_time)
      {
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double start_lot = CalculateLot(InpInitialLot);
-      trade.Buy(start_lot, _Symbol, ask, 0, 0, "First Auto Buy");
-      buy_count++; 
+      if(ask > safe_buy_price)
+        {
+         double start_lot = CalculateLot(InpInitialLot);
+         trade.Buy(start_lot, _Symbol, ask, 0, 0, "First Auto Buy");
+         buy_count++; 
+        }
      }
 
    // --- DASHBOARD DIAGNOSTIK ---
@@ -125,23 +143,22 @@ void OnTick()
    datetime time_wib = time_gmt + (7 * 3600); // Hitung WIB saat ini
    string string_wib = TimeToString(time_wib, TIME_MINUTES);
    
-   string dashboard = "=== EA MARTINGALE (WIB SESSION) ===\n";
+   string dashboard = "=== EA MARTINGALE (WIB & SnR) ===\n";
    dashboard += "Jam Saat Ini (WIB): " + string_wib + "\n";
-   
    string status_waktu = is_trading_time ? "ON (Sesi Aktif)" : "OFF (Menunggu Sesi)";
-   dashboard += "Status Trading: " + status_waktu + "\n\n";
-   dashboard += "Lot Awal (Start): " + DoubleToString(InpInitialLot, 2) + "\n";
-   dashboard += "Jarak Averaging: " + DoubleToString(InpGridDistance, 2) + "\n";
-   dashboard += "Multiplier Lot: " + DoubleToString(InpLotMultiplier, 2) + "\n";
+   dashboard += "Status Waktu: " + status_waktu + "\n\n";
+   
+   dashboard += "--- STATUS ENTRY SnR ---\n";
+   dashboard += "Resistance (High " + IntegerToString(InpSnRPeriod) + "): " + DoubleToString(current_resistance, 3) + "\n";
+   dashboard += "Syarat Buka SELL: Bid < " + DoubleToString(safe_sell_price, 3) + "\n";
+   dashboard += "Support (Low " + IntegerToString(InpSnRPeriod) + "): " + DoubleToString(current_support, 3) + "\n";
+   dashboard += "Syarat Buka BUY: Ask > " + DoubleToString(safe_buy_price, 3) + "\n\n";
    
    // ==========================================
    // 3. LOGIKA AVERAGING & TAKE PROFIT SELL (JALAN 24 JAM)
    // ==========================================
    if(sell_count > 0 && sum_sell_volume > 0) 
      {
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID); 
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK); 
-      
       double bep_sell = sum_sell_value / sum_sell_volume; 
       double target_price_sell;
       
@@ -156,7 +173,6 @@ void OnTick()
       dashboard += "Harga Buka Selanjutnya: " + DoubleToString(next_sell_price, 3) + "\n";
       dashboard += "Target Close (TP): " + DoubleToString(target_price_sell, 3) + "\n";
       
-      // Buka Posisi Martingale Baru 
       if(last_sell_price > 0 && bid >= next_sell_price)
         {
          double exact_calculated_lot = initial_sell_lot * MathPow(InpLotMultiplier, sell_count);
@@ -164,7 +180,6 @@ void OnTick()
          trade.Sell(new_lot, _Symbol, bid, 0, 0, "Auto Averaging Sell");
         }
         
-      // Tutup Semua Posisi
       if(ask <= target_price_sell && target_price_sell > 0)
         {
          CloseAll(POSITION_TYPE_SELL);
@@ -176,9 +191,6 @@ void OnTick()
    // ==========================================
    if(buy_count > 0 && sum_buy_volume > 0)
      {
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID); 
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK); 
-      
       double bep_buy = sum_buy_value / sum_buy_volume; 
       double target_price_buy;
       
@@ -193,7 +205,6 @@ void OnTick()
       dashboard += "Harga Buka Selanjutnya: " + DoubleToString(next_buy_price, 3) + "\n";
       dashboard += "Target Close (TP): " + DoubleToString(target_price_buy, 3) + "\n";
       
-      // Buka Posisi Martingale Baru 
       if(last_buy_price > 0 && ask <= next_buy_price)
         {
          double exact_calculated_lot = initial_buy_lot * MathPow(InpLotMultiplier, buy_count);
@@ -201,7 +212,6 @@ void OnTick()
          trade.Buy(new_lot, _Symbol, ask, 0, 0, "Auto Averaging Buy");
         }
         
-      // Tutup Semua Posisi
       if(bid >= target_price_buy && target_price_buy > 0)
         {
          CloseAll(POSITION_TYPE_BUY);
@@ -209,6 +219,32 @@ void OnTick()
      }
      
    Comment(dashboard);
+  }
+
+// --- FUNGSI MENCARI SUPPORT & RESISTANCE ---
+
+double GetResistance(int period)
+  {
+   double high[];
+   ArraySetAsSeries(high, true);
+   // Ambil data High dari candle 1 (candle yang sudah tutup) sampai batas periode
+   if(CopyHigh(_Symbol, _Period, 1, period, high) > 0)
+     {
+      return high[ArrayMaximum(high)];
+     }
+   return 0;
+  }
+
+double GetSupport(int period)
+  {
+   double low[];
+   ArraySetAsSeries(low, true);
+   // Ambil data Low dari candle 1 (candle yang sudah tutup) sampai batas periode
+   if(CopyLow(_Symbol, _Period, 1, period, low) > 0)
+     {
+      return low[ArrayMinimum(low)];
+     }
+   return 0;
   }
 
 // --- FUNGSI TAMBAHAN (WAKTU & LOT) ---
@@ -225,35 +261,21 @@ int TimeToMinutes(string time_str)
 
 bool CheckSession(int current_min, int start_min, int end_min)
   {
-   if(start_min < end_min)
-     {
-      return (current_min >= start_min && current_min <= end_min);
-     }
-   else
-     {
-      return (current_min >= start_min || current_min <= end_min);
-     }
+   if(start_min < end_min) return (current_min >= start_min && current_min <= end_min);
+   else return (current_min >= start_min || current_min <= end_min);
   }
 
-// Fungsi Pengecekan Waktu murni menggunakan WIB (GMT+7)
 bool IsTradingTime()
   {
-   // 1. Dapatkan jam GMT
    datetime time_gmt = TimeGMT();
-   
-   // 2. Tambahkan 7 jam (7 * 3600 detik) untuk menjadikannya WIB
    datetime time_wib = time_gmt + 25200; 
-   
-   // 3. Konversi ke struktur waktu untuk mengambil komponen Jam dan Menit
    MqlDateTime dt;
    TimeToStruct(time_wib, dt); 
-   
    int current_min = dt.hour * 60 + dt.min;
    
    if(CheckSession(current_min, AsiaStartMin, AsiaEndMin)) return true;
    if(CheckSession(current_min, EropaStartMin, EropaEndMin)) return true;
    if(CheckSession(current_min, USStartMin, USEndMin)) return true;
-   
    return false;
   }
 
