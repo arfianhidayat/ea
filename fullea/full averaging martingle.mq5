@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                         Auto_Martingale_Grid.mq5 |
-//|                                         Versi 3.5 (Adv SnR)      |
+//|                                     Versi 3.6 (Final SnR & Time) |
 //+------------------------------------------------------------------+
 #property copyright "Strategi Trading"
 #property link      "https://www.mql5.com"
-#property version   "3.50"
+#property version   "3.60"
 
 #include <Trade\Trade.mqh>
 
@@ -18,6 +18,11 @@ input int      InpAktifTPBEP2Posisi  = 5;        // Aktif TP BEP 2 pada Posisi k
 input double   InpTakeProfitBEP2     = 0.3;      // Take Profit BEP 2 (Averaging Lanjut)
 input double   InpLotMultiplier      = 1.2;      // Multiplier Martingale
 input ulong    InpMagicNumber        = 88888;    // Magic Number EA
+
+input group "=== AKTIVASI SESI TRADING ==="
+input bool     InpUseAsia            = true;     // Trade di Sesi Asia? (True/False)
+input bool     InpUseEropa           = true;     // Trade di Sesi Eropa? (True/False)
+input bool     InpUseUS              = true;     // Trade di Sesi Amerika? (True/False)
 
 input group "=== SETTING SESI TRADING (WAKTU WIB) ==="
 input string   InpAsiaStart          = "09:30";  // Mulai Sesi Asia (WIB)
@@ -111,7 +116,7 @@ void OnTick()
    double current_support = GetSupport(InpSnRPeriod, InpSnROffset);
    double current_resistance = GetResistance(InpSnRPeriod, InpSnROffset);
    
-   // Hitung Jarak Aman menggunakan Variabel Buffer baru
+   // Hitung Jarak Aman menggunakan Variabel Buffer
    double safe_buy_price = current_support + InpSnRBuffer;
    double safe_sell_price = current_resistance - InpSnRBuffer;
    
@@ -145,10 +150,12 @@ void OnTick()
    datetime time_wib = time_gmt + (7 * 3600); // Hitung WIB saat ini
    string string_wib = TimeToString(time_wib, TIME_MINUTES);
    
-   string dashboard = "=== EA MARTINGALE (ADV SnR) ===\n";
+   string dashboard = "=== EA MARTINGALE (ADV SnR & SESSIONS) ===\n";
    dashboard += "Jam Saat Ini (WIB): " + string_wib + "\n";
-   string status_waktu = is_trading_time ? "ON (Sesi Aktif)" : "OFF (Menunggu Sesi)";
-   dashboard += "Status Waktu: " + status_waktu + "\n\n";
+   
+   string status_waktu = is_trading_time ? "ON (Sesi Aktif)" : "OFF (Menunggu Sesi/Dimatikan)";
+   dashboard += "Status Waktu: " + status_waktu + "\n";
+   dashboard += "Asia: " + (InpUseAsia ? "ON" : "OFF") + " | Eropa: " + (InpUseEropa ? "ON" : "OFF") + " | US: " + (InpUseUS ? "ON" : "OFF") + "\n\n";
    
    dashboard += "--- STATUS ENTRY SnR (Offset: " + IntegerToString(InpSnROffset) + ") ---\n";
    dashboard += "Resistance (High " + IntegerToString(InpSnRPeriod) + "): " + DoubleToString(current_resistance, 3) + "\n";
@@ -229,7 +236,6 @@ double GetResistance(int period, int offset)
   {
    double high[];
    ArraySetAsSeries(high, true);
-   // Parameter ketiga (offset) mengatur darimana candle mulai dihitung mundur
    if(CopyHigh(_Symbol, _Period, offset, period, high) > 0)
      {
       return high[ArrayMaximum(high)];
@@ -241,7 +247,6 @@ double GetSupport(int period, int offset)
   {
    double low[];
    ArraySetAsSeries(low, true);
-   // Parameter ketiga (offset) mengatur darimana candle mulai dihitung mundur
    if(CopyLow(_Symbol, _Period, offset, period, low) > 0)
      {
       return low[ArrayMinimum(low)];
@@ -275,9 +280,10 @@ bool IsTradingTime()
    TimeToStruct(time_wib, dt); 
    int current_min = dt.hour * 60 + dt.min;
    
-   if(CheckSession(current_min, AsiaStartMin, AsiaEndMin)) return true;
-   if(CheckSession(current_min, EropaStartMin, EropaEndMin)) return true;
-   if(CheckSession(current_min, USStartMin, USEndMin)) return true;
+   if(InpUseAsia && CheckSession(current_min, AsiaStartMin, AsiaEndMin)) return true;
+   if(InpUseEropa && CheckSession(current_min, EropaStartMin, EropaEndMin)) return true;
+   if(InpUseUS && CheckSession(current_min, USStartMin, USEndMin)) return true;
+   
    return false;
   }
 
