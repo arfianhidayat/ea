@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                         Auto_Martingale_Grid.mq5 |
-//|                                         Versi 3.4 (SnR Filter)   |
+//|                                         Versi 3.5 (Adv SnR)      |
 //+------------------------------------------------------------------+
 #property copyright "Strategi Trading"
 #property link      "https://www.mql5.com"
-#property version   "3.40"
+#property version   "3.50"
 
 #include <Trade\Trade.mqh>
 
@@ -29,6 +29,8 @@ input string   InpUSEnd              = "01:30";  // Akhir Sesi Amerika (WIB)
 
 input group "=== SETTING SUPPORT & RESISTANCE ==="
 input int      InpSnRPeriod          = 50;       // Periode Candle untuk Cek SnR
+input int      InpSnROffset          = 5;        // Abaikan X Candle Terakhir (Offset)
+input double   InpSnRBuffer          = 3.0;      // Jarak Buffer dari SnR (Contoh: 3.0)
 
 CTrade trade;
 
@@ -105,13 +107,13 @@ void OnTick()
    // ==========================================
    bool is_trading_time = IsTradingTime();
    
-   // Dapatkan Nilai Support dan Resistance saat ini
-   double current_support = GetSupport(InpSnRPeriod);
-   double current_resistance = GetResistance(InpSnRPeriod);
+   // Dapatkan Nilai Support dan Resistance saat ini (Memasukkan Offset)
+   double current_support = GetSupport(InpSnRPeriod, InpSnROffset);
+   double current_resistance = GetResistance(InpSnRPeriod, InpSnROffset);
    
-   // Hitung Jarak Aman (Harga Syarat)
-   double safe_buy_price = current_support + (2.0 * InpGridDistance);
-   double safe_sell_price = current_resistance - (2.0 * InpGridDistance);
+   // Hitung Jarak Aman menggunakan Variabel Buffer baru
+   double safe_buy_price = current_support + InpSnRBuffer;
+   double safe_sell_price = current_resistance - InpSnRBuffer;
    
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -143,12 +145,12 @@ void OnTick()
    datetime time_wib = time_gmt + (7 * 3600); // Hitung WIB saat ini
    string string_wib = TimeToString(time_wib, TIME_MINUTES);
    
-   string dashboard = "=== EA MARTINGALE (WIB & SnR) ===\n";
+   string dashboard = "=== EA MARTINGALE (ADV SnR) ===\n";
    dashboard += "Jam Saat Ini (WIB): " + string_wib + "\n";
    string status_waktu = is_trading_time ? "ON (Sesi Aktif)" : "OFF (Menunggu Sesi)";
    dashboard += "Status Waktu: " + status_waktu + "\n\n";
    
-   dashboard += "--- STATUS ENTRY SnR ---\n";
+   dashboard += "--- STATUS ENTRY SnR (Offset: " + IntegerToString(InpSnROffset) + ") ---\n";
    dashboard += "Resistance (High " + IntegerToString(InpSnRPeriod) + "): " + DoubleToString(current_resistance, 3) + "\n";
    dashboard += "Syarat Buka SELL: Bid < " + DoubleToString(safe_sell_price, 3) + "\n";
    dashboard += "Support (Low " + IntegerToString(InpSnRPeriod) + "): " + DoubleToString(current_support, 3) + "\n";
@@ -221,26 +223,26 @@ void OnTick()
    Comment(dashboard);
   }
 
-// --- FUNGSI MENCARI SUPPORT & RESISTANCE ---
+// --- FUNGSI MENCARI SUPPORT & RESISTANCE (DENGAN OFFSET) ---
 
-double GetResistance(int period)
+double GetResistance(int period, int offset)
   {
    double high[];
    ArraySetAsSeries(high, true);
-   // Ambil data High dari candle 1 (candle yang sudah tutup) sampai batas periode
-   if(CopyHigh(_Symbol, _Period, 1, period, high) > 0)
+   // Parameter ketiga (offset) mengatur darimana candle mulai dihitung mundur
+   if(CopyHigh(_Symbol, _Period, offset, period, high) > 0)
      {
       return high[ArrayMaximum(high)];
      }
    return 0;
   }
 
-double GetSupport(int period)
+double GetSupport(int period, int offset)
   {
    double low[];
    ArraySetAsSeries(low, true);
-   // Ambil data Low dari candle 1 (candle yang sudah tutup) sampai batas periode
-   if(CopyLow(_Symbol, _Period, 1, period, low) > 0)
+   // Parameter ketiga (offset) mengatur darimana candle mulai dihitung mundur
+   if(CopyLow(_Symbol, _Period, offset, period, low) > 0)
      {
       return low[ArrayMinimum(low)];
      }
