@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Strategi Trading"
 #property link      "https://www.mql5.com"
-#property version   "2.20"
+#property version   "2.21" // Update versi untuk perbaikan lot
 
 #include <Trade\Trade.mqh>
 
@@ -14,7 +14,7 @@ input double   InpTakeProfitSingle   = 5.0;      // Take Profit jika HANYA 1 Pos
 input double   InpTakeProfitBEP1     = 2.0;      // Take Profit BEP 1 (Averaging Awal)
 input int      InpAktifTPBEP2Posisi  = 5;        // Aktif TP BEP 2 pada Posisi ke-
 input double   InpTakeProfitBEP2     = 1.0;      // Take Profit BEP 2 (Averaging Lanjut)
-input double   InpLotMultiplier      = 2.0;      // Multiplier Martingale (Contoh: 2.0)
+input double   InpLotMultiplier      = 1.3;      // Multiplier Martingale
 input ulong    InpMagicNumber        = 88888;    // Magic Number EA
 
 CTrade trade;
@@ -35,9 +35,11 @@ void OnTick()
    double sum_sell_volume = 0, sum_sell_value = 0;
    
    double last_buy_price = 0, last_sell_price = 0;
-   double last_buy_lot = 0, last_sell_lot = 0;
    
+   // Tambahan Variabel untuk menyimpan Lot Awal (Posisi Pertama)
+   double initial_buy_lot = 0, initial_sell_lot = 0;
    datetime latest_buy_time = 0, latest_sell_time = 0;
+   datetime oldest_buy_time = 0, oldest_sell_time = 0;
    
    // 1. Membaca Posisi Terbuka
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -56,12 +58,20 @@ void OnTick()
             if(type == POSITION_TYPE_BUY)
               {
                buy_count++; sum_buy_volume += vol; sum_buy_value += (price * vol); 
-               if(time >= latest_buy_time) { latest_buy_time = time; last_buy_price = price; last_buy_lot = vol; }
+               
+               // Mencari Harga Terakhir (Untuk Jarak Grid)
+               if(time >= latest_buy_time) { latest_buy_time = time; last_buy_price = price; }
+               // Mencari Lot Awal (Posisi Paling Lama) untuk rumus eksponensial
+               if(oldest_buy_time == 0 || time < oldest_buy_time) { oldest_buy_time = time; initial_buy_lot = vol; }
               }
             else if(type == POSITION_TYPE_SELL)
               {
                sell_count++; sum_sell_volume += vol; sum_sell_value += (price * vol); 
-               if(time >= latest_sell_time) { latest_sell_time = time; last_sell_price = price; last_sell_lot = vol; }
+               
+               // Mencari Harga Terakhir (Untuk Jarak Grid)
+               if(time >= latest_sell_time) { latest_sell_time = time; last_sell_price = price; }
+               // Mencari Lot Awal (Posisi Paling Lama) untuk rumus eksponensial
+               if(oldest_sell_time == 0 || time < oldest_sell_time) { oldest_sell_time = time; initial_sell_lot = vol; }
               }
            }
         }
@@ -112,10 +122,12 @@ void OnTick()
       dashboard += "Harga BEP Rata-rata: " + DoubleToString(bep_sell, 3) + "\n";
       dashboard += "Target Close (TP) di Harga: " + DoubleToString(target_price_sell, 3) + "\n";
       
-      // Buka Posisi Martingale Baru
+      // Buka Posisi Martingale Baru (MENGGUNAKAN RUMUS EKSPONENSIAL)
       if(bid >= next_sell_price)
         {
-         double new_lot = CalculateLot(last_sell_lot * InpLotMultiplier);
+         // Rumus: Lot Awal * (Multiplier ^ Jumlah Posisi Saat Ini)
+         double exact_calculated_lot = initial_sell_lot * MathPow(InpLotMultiplier, sell_count);
+         double new_lot = CalculateLot(exact_calculated_lot);
          trade.Sell(new_lot, _Symbol, bid, 0, 0, "Auto Averaging Sell");
         }
         
@@ -127,7 +139,7 @@ void OnTick()
         }
      }
      
-   // 3. Eksekusi BUY (Kebalikan dari Sell)
+   // 3. Eksekusi BUY
    if(buy_count > 0)
      {
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID); 
@@ -166,10 +178,12 @@ void OnTick()
       dashboard += "Harga BEP Rata-rata: " + DoubleToString(bep_buy, 3) + "\n";
       dashboard += "Target Close (TP) di Harga: " + DoubleToString(target_price_buy, 3) + "\n";
       
-      // Buka Posisi Martingale Baru
+      // Buka Posisi Martingale Baru (MENGGUNAKAN RUMUS EKSPONENSIAL)
       if(ask <= next_buy_price)
         {
-         double new_lot = CalculateLot(last_buy_lot * InpLotMultiplier);
+         // Rumus: Lot Awal * (Multiplier ^ Jumlah Posisi Saat Ini)
+         double exact_calculated_lot = initial_buy_lot * MathPow(InpLotMultiplier, buy_count);
+         double new_lot = CalculateLot(exact_calculated_lot);
          trade.Buy(new_lot, _Symbol, ask, 0, 0, "Auto Averaging Buy");
         }
         
