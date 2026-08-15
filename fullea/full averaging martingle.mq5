@@ -1,5 +1,3 @@
-Saat ini ea Ketika open posisi selalu menggunakan variabel lot awal, cek juga ketika ada posisi yang berlawanan arah terbuka, cek berapa lot posisi terakhir terbuka maka gunakan lot tersebut sebagai lot awal open posisi
-
 //+------------------------------------------------------------------+
 //|                                         Auto_Martingale_Grid.mq5 |
 //|                                     Versi 3.6 (Final SnR & Time) |
