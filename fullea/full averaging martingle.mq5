@@ -1,19 +1,21 @@
+Saat ini ea Ketika open posisi selalu menggunakan variabel lot awal, cek juga ketika ada posisi yang berlawanan arah terbuka, cek berapa lot posisi terakhir terbuka maka gunakan lot tersebut sebagai lot awal open posisi
+
 //+------------------------------------------------------------------+
 //|                                         Auto_Martingale_Grid.mq5 |
-//|                                         Versi 3.7 (Sync Lot)     |
+//|                                     Versi 3.6 (Final SnR & Time) |
 //+------------------------------------------------------------------+
 #property copyright "Strategi Trading"
 #property link      "https://www.mql5.com"
-#property version   "3.70"
+#property version   "3.60"
 
 #include <Trade\Trade.mqh>
 
 //--- Input Parameters ---
 input group "=== SETTING LOT & GRID ==="
-input double   InpInitialLot         = 0.01;     // Lot Awal (Posisi Pertama Default)
+input double   InpInitialLot         = 0.01;     // Lot Awal (Posisi Pertama)
 input double   InpGridDistance       = 1.5;      // Jarak Buka Posisi Averaging
 input double   InpTakeProfitSingle   = 1.0;      // Take Profit jika HANYA 1 Posisi
-input double   InpTakeProfitBEP1     = 0.4;      // Take Profit BEP 1 (Averaging Awal)
+input double   InpTakeProfitBEP1     = 0.5;      // Take Profit BEP 1 (Averaging Awal)
 input int      InpAktifTPBEP2Posisi  = 5;        // Aktif TP BEP 2 pada Posisi ke-
 input double   InpTakeProfitBEP2     = 0.2;      // Take Profit BEP 2 (Averaging Lanjut)
 input double   InpLotMultiplier      = 1.2;      // Multiplier Martingale
@@ -70,7 +72,6 @@ void OnTick()
    double sum_sell_volume = 0, sum_sell_value = 0;
    
    double last_buy_price = 0, last_sell_price = 0;
-   double last_buy_lot = 0, last_sell_lot = 0; // Variabel baru untuk melacak lot terakhir
    
    double initial_buy_lot = 0, initial_sell_lot = 0;
    datetime latest_buy_time = 0, latest_sell_time = 0;
@@ -94,14 +95,14 @@ void OnTick()
               {
                buy_count++; sum_buy_volume += vol; sum_buy_value += (price * vol); 
                
-               if(time >= latest_buy_time) { latest_buy_time = time; last_buy_price = price; last_buy_lot = vol; }
+               if(time >= latest_buy_time) { latest_buy_time = time; last_buy_price = price; }
                if(oldest_buy_time == 0 || time < oldest_buy_time) { oldest_buy_time = time; initial_buy_lot = vol; }
               }
             else if(type == POSITION_TYPE_SELL)
               {
                sell_count++; sum_sell_volume += vol; sum_sell_value += (price * vol); 
                
-               if(time >= latest_sell_time) { latest_sell_time = time; last_sell_price = price; last_sell_lot = vol; }
+               if(time >= latest_sell_time) { latest_sell_time = time; last_sell_price = price; }
                if(oldest_sell_time == 0 || time < oldest_sell_time) { oldest_sell_time = time; initial_sell_lot = vol; }
               }
            }
@@ -109,7 +110,7 @@ void OnTick()
      }
      
    // ==========================================
-   // 2. LOGIKA OPEN POSISI AWAL (FILTER WIB & SnR & SYNC LOT)
+   // 2. LOGIKA OPEN POSISI AWAL (FILTER WIB & SnR)
    // ==========================================
    bool is_trading_time = IsTradingTime();
    
@@ -124,17 +125,13 @@ void OnTick()
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    
-   // Logika Penentuan Lot Awal Sinkronisasi Berlawanan Arah
-   double dynamic_start_sell_lot = (buy_count > 0 && last_buy_lot > 0) ? last_buy_lot : InpInitialLot;
-   double dynamic_start_buy_lot = (sell_count > 0 && last_sell_lot > 0) ? last_sell_lot : InpInitialLot;
-   
    // Jika tidak ada posisi SELL, DAN sedang dalam Sesi Trading, DAN harga memenuhi syarat SnR
    if(sell_count == 0 && is_trading_time)
      {
       if(bid < safe_sell_price)
         {
-         double start_lot = CalculateLot(dynamic_start_sell_lot);
-         trade.Sell(start_lot, _Symbol, bid, 0, 0, "First Auto Sell (Sync)");
+         double start_lot = CalculateLot(InpInitialLot);
+         trade.Sell(start_lot, _Symbol, bid, 0, 0, "First Auto Sell");
          sell_count++; 
         }
      }
@@ -144,8 +141,8 @@ void OnTick()
      {
       if(ask > safe_buy_price)
         {
-         double start_lot = CalculateLot(dynamic_start_buy_lot);
-         trade.Buy(start_lot, _Symbol, ask, 0, 0, "First Auto Buy (Sync)");
+         double start_lot = CalculateLot(InpInitialLot);
+         trade.Buy(start_lot, _Symbol, ask, 0, 0, "First Auto Buy");
          buy_count++; 
         }
      }
@@ -155,22 +152,18 @@ void OnTick()
    datetime time_wib = time_gmt + (7 * 3600); // Hitung WIB saat ini
    string string_wib = TimeToString(time_wib, TIME_MINUTES);
    
-   string dashboard = "=== EA MARTINGALE (SYNC LOT & SnR) ===\n";
+   string dashboard = "=== EA MARTINGALE (ADV SnR & SESSIONS) ===\n";
    dashboard += "Jam Saat Ini (WIB): " + string_wib + "\n";
    
    string status_waktu = is_trading_time ? "ON (Sesi Aktif)" : "OFF (Menunggu Sesi/Dimatikan)";
    dashboard += "Status Waktu: " + status_waktu + "\n";
    dashboard += "Asia: " + (InpUseAsia ? "ON" : "OFF") + " | Eropa: " + (InpUseEropa ? "ON" : "OFF") + " | US: " + (InpUseUS ? "ON" : "OFF") + "\n\n";
    
-   dashboard += "--- STATUS ENTRY AWAL ---\n";
-   dashboard += "Rencana Lot Awal BUY : " + DoubleToString(dynamic_start_buy_lot, 2) + "\n";
-   dashboard += "Rencana Lot Awal SELL: " + DoubleToString(dynamic_start_sell_lot, 2) + "\n\n";
-   
-   dashboard += "--- SYARAT SnR (Offset: " + IntegerToString(InpSnROffset) + ") ---\n";
+   dashboard += "--- STATUS ENTRY SnR (Offset: " + IntegerToString(InpSnROffset) + ") ---\n";
    dashboard += "Resistance (High " + IntegerToString(InpSnRPeriod) + "): " + DoubleToString(current_resistance, 3) + "\n";
-   dashboard += "Buka SELL Jika Bid < " + DoubleToString(safe_sell_price, 3) + "\n";
+   dashboard += "Syarat Buka SELL: Bid < " + DoubleToString(safe_sell_price, 3) + "\n";
    dashboard += "Support (Low " + IntegerToString(InpSnRPeriod) + "): " + DoubleToString(current_support, 3) + "\n";
-   dashboard += "Buka BUY Jika Ask > " + DoubleToString(safe_buy_price, 3) + "\n\n";
+   dashboard += "Syarat Buka BUY: Ask > " + DoubleToString(safe_buy_price, 3) + "\n\n";
    
    // ==========================================
    // 3. LOGIKA AVERAGING & TAKE PROFIT SELL (JALAN 24 JAM)
@@ -186,9 +179,9 @@ void OnTick()
         
       double next_sell_price = last_sell_price + InpGridDistance;
       
-      dashboard += "--- STATUS POSISI SELL ---\n";
+      dashboard += "--- STATUS SELL ---\n";
       dashboard += "Total Posisi: " + IntegerToString(sell_count) + "\n";
-      dashboard += "Averaging Selanjutnya: " + DoubleToString(next_sell_price, 3) + "\n";
+      dashboard += "Harga Buka Selanjutnya: " + DoubleToString(next_sell_price, 3) + "\n";
       dashboard += "Target Close (TP): " + DoubleToString(target_price_sell, 3) + "\n";
       
       if(last_sell_price > 0 && bid >= next_sell_price)
@@ -218,9 +211,9 @@ void OnTick()
         
       double next_buy_price = last_buy_price - InpGridDistance;
       
-      dashboard += "--- STATUS POSISI BUY ---\n";
+      dashboard += "--- STATUS BUY ---\n";
       dashboard += "Total Posisi: " + IntegerToString(buy_count) + "\n";
-      dashboard += "Averaging Selanjutnya: " + DoubleToString(next_buy_price, 3) + "\n";
+      dashboard += "Harga Buka Selanjutnya: " + DoubleToString(next_buy_price, 3) + "\n";
       dashboard += "Target Close (TP): " + DoubleToString(target_price_buy, 3) + "\n";
       
       if(last_buy_price > 0 && ask <= next_buy_price)
