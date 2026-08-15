@@ -8,12 +8,12 @@
 
 #include <Trade\Trade.mqh>
 
-//--- Input Parameters ---
+//--- Input Parameters --- DD 27.63 (5.4%)
 input group "=== SETTING LOT & GRID ==="
 input double   InpInitialLot         = 0.01;     // Lot Awal (Posisi Pertama)
-input double   InpGridDistance       = 1.5;      // Jarak Buka Posisi Averaging
-input double   InpTakeProfitSingle   = 1.0;      // Take Profit jika HANYA 1 Posisi
-input double   InpTakeProfitBEP1     = 0.5;      // Take Profit BEP 1 (Averaging Awal)
+input double   InpGridDistance       = 6.0;      // Jarak Buka Posisi Averaging
+input double   InpTakeProfitSingle   = 2.0;      // Take Profit jika HANYA 1 Posisi
+input double   InpTakeProfitBEP1     = 0.4;      // Take Profit BEP 1 (Averaging Awal)
 input int      InpAktifTPBEP2Posisi  = 5;        // Aktif TP BEP 2 pada Posisi ke-
 input double   InpTakeProfitBEP2     = 0.2;      // Take Profit BEP 2 (Averaging Lanjut)
 input double   InpLotMultiplier      = 1.2;      // Multiplier Martingale
