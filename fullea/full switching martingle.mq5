@@ -25,7 +25,7 @@ input double InpTargetBEPPoints = 300.0;   // Target Profit setelah BEP 1 (Point
 input double InpTargetBEP2Points = 150.0;  // Target Profit setelah BEP 2 (Points)
 input int InpBEP2ActivationPos = 5;        // Aktifkan BEP 2 mulai posisi ke-
 input double InpLotMultiplier = 2.0;       // Pengali Lot Martingale
-input int InpMaxPositions = 8;             // Batas Maksimal Posisi Terbuka
+input int InpMaxPositions = 999;           // Batas Maksimal Posisi Terbuka
 input int InpSnRPeriod = 50;               // Periode Candle Support & Resistance Visual
 input ulong InpMagic = 99999;              // EA Magic Number
 
