@@ -19,7 +19,7 @@ input double InpBreakoutBuffer   = 15.0;       // Jarak Buffer Pips Breakout
 input double InpInitialLot       = 0.01;       // Lot Awal Posisi Pertama
 
 input group "=== Martingale & Target Settings ==="
-input double InpLossPoints = 500.0;        // Jarak Loss Switch/Martingale (Points)
+input double InpLossPoints = 400.0;        // Jarak Loss Switch/Martingale (Points)
 input double InpTargetPoints = 500.0;      // Target Profit Posisi 1/Awal (Points)
 input double InpTargetBEPPoints = 300.0;   // Target Profit setelah BEP 1 (Points)
 input double InpTargetBEP2Points = 150.0;  // Target Profit setelah BEP 2 (Points)
