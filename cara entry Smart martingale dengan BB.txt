@@ -27,3 +27,9 @@ Agar saya bisa menghitung ketahanan margin yang akurat dan bukan sekadar asumsi 
  * Apa instrumen spesifik yang ingin Anda perdagangkan dengan strategi ini (misalnya: Saham BBCA, Forex EURUSD, atau XAUUSD)?
  * Berapa total modal (budget) nyata yang Anda siapkan khusus untuk akun yang menjalankan sistem ini?
  * Secara psikologis dan manajemen risiko, berapa batas maksimal kerugian (Max Drawdown) dari modal yang siap Anda toleransi sebelum memotong paksa seluruh posisi (Cut Loss)?
+
+
+Penyesuaian Strategi (Skenario Hipotetis)
+​Mengasumsikan Anda tetap ingin mengeksekusi strategi ini di M5 dengan modal yang memadai dan spread instrumen yang sangat kecil (mendekati 0 pip), Anda wajib menerapkan perlindungan ganda:
+​Wajib Menggunakan Filter Tren Ekstra: Anda tidak boleh mengambil semua sinyal pantulan Bollinger Bands. Tambahkan indikator Exponential Moving Average (EMA) 200. Jika harga berada di bawah EMA 200, Anda dilarang keras membuka posisi Buy meskipun harga menyentuh Lower Band, karena tren utama sedang turun.
+​Zona Waktu Terbatas: Hindari sesi overlap London dan New York (sekitar pukul 19.00 - 23.00 WIB) atau saat jadwal rilis berita ekonomi. Eksekusi strategi M5 ini hanya saat pasar sedang sepi dan sideways, misalnya pada sesi Asia (pagi hingga siang hari WIB).
