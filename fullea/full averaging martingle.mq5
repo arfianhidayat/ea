@@ -1,227 +1,170 @@
 //+------------------------------------------------------------------+
-//|                                         Auto_Martingale_Grid.mq5 |
-//|                                     Versi 3.6 (Final SnR & Time) |
+//|                                  Auto_Martingale_Grid_BB_Mod.mq5 |
+//|                                  Versi 3.8 (BB Squeeze Sideways) |
 //+------------------------------------------------------------------+
 #property copyright "Strategi Trading"
 #property link      "https://www.mql5.com"
-#property version   "3.60"
+#property version   "3.80"
 
 #include <Trade\Trade.mqh>
 
-//--- Input Parameters --- DD 27.63 (5.4%)
+//--- Input Parameters --- 
 input group "=== SETTING LOT & GRID ==="
-input double   InpInitialLot         = 0.01;     // Lot Awal (Posisi Pertama)
-input double   InpGridDistance       = 6.0;      // Jarak Buka Posisi Averaging
-input double   InpTakeProfitSingle   = 2.0;      // Take Profit jika HANYA 1 Posisi
-input double   InpTakeProfitBEP1     = 0.4;      // Take Profit BEP 1 (Averaging Awal)
-input int      InpAktifTPBEP2Posisi  = 5;        // Aktif TP BEP 2 pada Posisi ke-
-input double   InpTakeProfitBEP2     = 0.2;      // Take Profit BEP 2 (Averaging Lanjut)
-input double   InpLotMultiplier      = 1.2;      // Multiplier Martingale
-input ulong    InpMagicNumber        = 88888;    // Magic Number EA
+input double   InpInitialLot         = 0.01;     
+input double   InpGridDistance       = 3.0;      
+input double   InpTakeProfitSingle   = 1.5;      
+input double   InpTakeProfitBEP1     = 0.7;      
+input int      InpAktifTPBEP2Posisi  = 5;        
+input double   InpTakeProfitBEP2     = 0.3;      
+input double   InpLotMultiplier      = 1.3;      
+input ulong    InpMagicNumber        = 88888;    
+
+input group "=== FILTER SIDEWAYS BOLLINGER BANDS ==="
+input ENUM_TIMEFRAMES InpBBTimeFrame = PERIOD_H1;  // Timeframe BB
+input int      InpBBPeriod           = 20;         // Periode BB
+input double   InpBBDeviation        = 2.0;        // Deviasi BB
+input double   InpMaxBandWidthPips   = 25.0;       // Maksimal Lebar BB (Pips) untuk Sideways
 
 input group "=== AKTIVASI SESI TRADING ==="
-input bool     InpUseAsia            = true;     // Trade di Sesi Asia? (True/False)
-input bool     InpUseEropa           = true;     // Trade di Sesi Eropa? (True/False)
-input bool     InpUseUS              = true;     // Trade di Sesi Amerika? (True/False)
-
-input group "=== SETTING SESI TRADING (WAKTU WIB) ==="
-input string   InpAsiaStart          = "09:30";  // Mulai Sesi Asia (WIB)
-input string   InpAsiaEnd            = "12:30";  // Akhir Sesi Asia (WIB)
-input string   InpEropaStart         = "15:30";  // Mulai Sesi Eropa (WIB)
-input string   InpEropaEnd           = "17:30";  // Akhir Sesi Eropa (WIB)
-input string   InpUSStart            = "22:30";  // Mulai Sesi Amerika (WIB)
-input string   InpUSEnd              = "01:30";  // Akhir Sesi Amerika (WIB)
+input bool     InpUseAsia            = true;     
+input bool     InpUseEropa           = true;     
+input bool     InpUseUS              = true;     
+input string   InpAsiaStart          = "09:30";  
+input string   InpAsiaEnd            = "12:30";  
+input string   InpEropaStart         = "15:30";  
+input string   InpEropaEnd           = "17:30";  
+input string   InpUSStart            = "22:30";  
+input string   InpUSEnd              = "01:30";  
 
 input group "=== SETTING SUPPORT & RESISTANCE ==="
-input int      InpSnRPeriod          = 50;       // Periode Candle untuk Cek SnR
-input int      InpSnROffset          = 5;        // Abaikan X Candle Terakhir (Offset)
-input double   InpSnRBuffer          = 3.0;      // Jarak Buffer dari SnR (Contoh: 3.0)
+input int      InpSnRPeriod          = 10;       
+input int      InpSnROffset          = 4;        
+input double   InpSnRBuffer          = 3.0;      
 
 CTrade trade;
 
-// Variabel Global untuk menyimpan konversi menit
-int AsiaStartMin, AsiaEndMin;
-int EropaStartMin, EropaEndMin;
-int USStartMin, USEndMin;
+int AsiaStartMin, AsiaEndMin, EropaStartMin, EropaEndMin, USStartMin, USEndMin;
+int bb_handle; 
+double pip_multiplier;
 
-// --- FUNGSI INISIALISASI ---
+// --- FUNGSI INISIALISASI UTAMA ---
 int OnInit()
   {
    trade.SetExpertMagicNumber(InpMagicNumber);
-   trade.SetDeviationInPoints(50); // Toleransi slippage
+   trade.SetDeviationInPoints(50);
    
-   // Konversi input string HH:MM menjadi total menit dalam sehari
-   AsiaStartMin = TimeToMinutes(InpAsiaStart);
-   AsiaEndMin = TimeToMinutes(InpAsiaEnd);
-   EropaStartMin = TimeToMinutes(InpEropaStart);
-   EropaEndMin = TimeToMinutes(InpEropaEnd);
-   USStartMin = TimeToMinutes(InpUSStart);
-   USEndMin = TimeToMinutes(InpUSEnd);
+   AsiaStartMin = TimeToMinutes(InpAsiaStart); AsiaEndMin = TimeToMinutes(InpAsiaEnd);
+   EropaStartMin = TimeToMinutes(InpEropaStart); EropaEndMin = TimeToMinutes(InpEropaEnd);
+   USStartMin = TimeToMinutes(InpUSStart); USEndMin = TimeToMinutes(InpUSEnd);
+   
+   // Tentukan multiplier Pips berdasarkan digit broker
+   pip_multiplier = MathPow(10, _Digits % 2 == 1 ? _Digits - 1 : _Digits);
+   
+   // Inisialisasi Indikator BB
+   bb_handle = iBands(_Symbol, InpBBTimeFrame, InpBBPeriod, 0, InpBBDeviation, PRICE_CLOSE);
+   if(bb_handle == INVALID_HANDLE) return(INIT_FAILED);
    
    return(INIT_SUCCEEDED);
   }
 
+// --- FUNGSI UTAMA (BERJALAN SETIAP TICK HARGA) ---
 void OnTick()
   {
-   int buy_count = 0;
-   int sell_count = 0;
+   int buy_count = 0, sell_count = 0;
+   double sum_buy_volume = 0, sum_buy_value = 0, sum_sell_volume = 0, sum_sell_value = 0;
+   double last_buy_price = 0, last_sell_price = 0, initial_buy_lot = 0, initial_sell_lot = 0;
+   datetime latest_buy_time = 0, latest_sell_time = 0, oldest_buy_time = 0, oldest_sell_time = 0;
    
-   double sum_buy_volume = 0, sum_buy_value = 0;
-   double sum_sell_volume = 0, sum_sell_value = 0;
-   
-   double last_buy_price = 0, last_sell_price = 0;
-   
-   double initial_buy_lot = 0, initial_sell_lot = 0;
-   datetime latest_buy_time = 0, latest_sell_time = 0;
-   datetime oldest_buy_time = 0, oldest_sell_time = 0;
-   
-   // 1. Membaca Posisi Terbuka
+   // --- MEMBACA POSISI TERBUKA ---
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong ticket = PositionGetTicket(i);
-      if(PositionGetString(POSITION_SYMBOL) == _Symbol)
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol && (PositionGetInteger(POSITION_MAGIC) == 0 || PositionGetInteger(POSITION_MAGIC) == InpMagicNumber))
         {
-         ulong magic = PositionGetInteger(POSITION_MAGIC);
-         if(magic == 0 || magic == InpMagicNumber)
-           {
-            long type = PositionGetInteger(POSITION_TYPE);
-            double price = PositionGetDouble(POSITION_PRICE_OPEN);
-            double vol = PositionGetDouble(POSITION_VOLUME);
-            datetime time = (datetime)PositionGetInteger(POSITION_TIME);
-            
-            if(type == POSITION_TYPE_BUY)
-              {
-               buy_count++; sum_buy_volume += vol; sum_buy_value += (price * vol); 
-               
-               if(time >= latest_buy_time) { latest_buy_time = time; last_buy_price = price; }
-               if(oldest_buy_time == 0 || time < oldest_buy_time) { oldest_buy_time = time; initial_buy_lot = vol; }
-              }
-            else if(type == POSITION_TYPE_SELL)
-              {
-               sell_count++; sum_sell_volume += vol; sum_sell_value += (price * vol); 
-               
-               if(time >= latest_sell_time) { latest_sell_time = time; last_sell_price = price; }
-               if(oldest_sell_time == 0 || time < oldest_sell_time) { oldest_sell_time = time; initial_sell_lot = vol; }
-              }
+         long type = PositionGetInteger(POSITION_TYPE);
+         double price = PositionGetDouble(POSITION_PRICE_OPEN), vol = PositionGetDouble(POSITION_VOLUME);
+         datetime time = (datetime)PositionGetInteger(POSITION_TIME);
+         
+         if(type == POSITION_TYPE_BUY) 
+           { 
+            buy_count++; sum_buy_volume += vol; sum_buy_value += (price * vol); 
+            if(time >= latest_buy_time) { latest_buy_time = time; last_buy_price = price; } 
+            if(oldest_buy_time == 0 || time < oldest_buy_time) { oldest_buy_time = time; initial_buy_lot = vol; } 
+           }
+         else if(type == POSITION_TYPE_SELL) 
+           { 
+            sell_count++; sum_sell_volume += vol; sum_sell_value += (price * vol); 
+            if(time >= latest_sell_time) { latest_sell_time = time; last_sell_price = price; } 
+            if(oldest_sell_time == 0 || time < oldest_sell_time) { oldest_sell_time = time; initial_sell_lot = vol; } 
            }
         }
      }
      
-   // ==========================================
-   // 2. LOGIKA OPEN POSISI AWAL (FILTER WIB & SnR)
-   // ==========================================
-   bool is_trading_time = IsTradingTime();
+   // --- MENGAMBIL NILAI BB TERBARU ---
+   double upper_bb[], lower_bb[];
+   ArraySetAsSeries(upper_bb, true); 
+   ArraySetAsSeries(lower_bb, true);
+   double band_width_pips = 0.0;
    
-   // Dapatkan Nilai Support dan Resistance saat ini (Memasukkan Offset)
-   double current_support = GetSupport(InpSnRPeriod, InpSnROffset);
-   double current_resistance = GetResistance(InpSnRPeriod, InpSnROffset);
-   
-   // Hitung Jarak Aman menggunakan Variabel Buffer
-   double safe_buy_price = current_support + InpSnRBuffer;
-   double safe_sell_price = current_resistance - InpSnRBuffer;
-   
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   
-   // Jika tidak ada posisi SELL, DAN sedang dalam Sesi Trading, DAN harga memenuhi syarat SnR
-   if(sell_count == 0 && is_trading_time)
+   if(CopyBuffer(bb_handle, 1, 0, 1, upper_bb) > 0 && CopyBuffer(bb_handle, 2, 0, 1, lower_bb) > 0)
      {
-      if(bid < safe_sell_price)
-        {
-         double start_lot = CalculateLot(InpInitialLot);
-         trade.Sell(start_lot, _Symbol, bid, 0, 0, "First Auto Sell");
-         sell_count++; 
-        }
+      // Menghitung lebar pita BB dalam satuan pips
+      band_width_pips = (upper_bb[0] - lower_bb[0]) * pip_multiplier;
      }
-     
-   // Jika tidak ada posisi BUY, DAN sedang dalam Sesi Trading, DAN harga memenuhi syarat SnR
-   if(buy_count == 0 && is_trading_time)
+   
+   bool is_sideways = (band_width_pips > 0 && band_width_pips < InpMaxBandWidthPips);
+   
+   // --- LOGIKA OPEN AWAL (PERTAMA KALI) ---
+   bool is_trading_time = IsTradingTime();
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID), ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double safe_buy_price = GetSupport(InpSnRPeriod, InpSnROffset) + InpSnRBuffer;
+   double safe_sell_price = GetResistance(InpSnRPeriod, InpSnROffset) - InpSnRBuffer;
+   
+   if(sell_count == 0 && is_trading_time && is_sideways && bid < safe_sell_price)
      {
-      if(ask > safe_buy_price)
-        {
-         double start_lot = CalculateLot(InpInitialLot);
-         trade.Buy(start_lot, _Symbol, ask, 0, 0, "First Auto Buy");
-         buy_count++; 
-        }
+      trade.Sell(CalculateLot(InpInitialLot), _Symbol, bid, 0, 0, "First Auto Sell");
+     }
+      
+   if(buy_count == 0 && is_trading_time && is_sideways && ask > safe_buy_price)
+     {
+      trade.Buy(CalculateLot(InpInitialLot), _Symbol, ask, 0, 0, "First Auto Buy");
      }
 
-   // --- DASHBOARD DIAGNOSTIK ---
-   datetime time_gmt = TimeGMT();
-   datetime time_wib = time_gmt + (7 * 3600); // Hitung WIB saat ini
-   string string_wib = TimeToString(time_wib, TIME_MINUTES);
+   // --- DASHBOARD LAYAR ---
+   string dashboard = "=== EA MARTINGALE (BB SQUEEZE FILTER) ===\n";
+   dashboard += "Waktu Sesi: " + (string)(is_trading_time ? "ON" : "OFF") + "\n\n";
+   dashboard += "--- FILTER BOLLINGER BANDS (" + EnumToString(InpBBTimeFrame) + ") ---\n";
+   dashboard += "Lebar BB Saat Ini: " + DoubleToString(band_width_pips, 1) + " Pips\n";
+   dashboard += "Batas Sideways: < " + DoubleToString(InpMaxBandWidthPips, 1) + " Pips\n";
+   dashboard += "Status: " + (string)(is_sideways ? "SIDEWAYS (Aman)" : "TRENDING (Ditahan)") + "\n\n";
    
-   string dashboard = "=== EA MARTINGALE (ADV SnR & SESSIONS) ===\n";
-   dashboard += "Jam Saat Ini (WIB): " + string_wib + "\n";
-   
-   string status_waktu = is_trading_time ? "ON (Sesi Aktif)" : "OFF (Menunggu Sesi/Dimatikan)";
-   dashboard += "Status Waktu: " + status_waktu + "\n";
-   dashboard += "Asia: " + (InpUseAsia ? "ON" : "OFF") + " | Eropa: " + (InpUseEropa ? "ON" : "OFF") + " | US: " + (InpUseUS ? "ON" : "OFF") + "\n\n";
-   
-   dashboard += "--- STATUS ENTRY SnR (Offset: " + IntegerToString(InpSnROffset) + ") ---\n";
-   dashboard += "Resistance (High " + IntegerToString(InpSnRPeriod) + "): " + DoubleToString(current_resistance, 3) + "\n";
-   dashboard += "Syarat Buka SELL: Bid < " + DoubleToString(safe_sell_price, 3) + "\n";
-   dashboard += "Support (Low " + IntegerToString(InpSnRPeriod) + "): " + DoubleToString(current_support, 3) + "\n";
-   dashboard += "Syarat Buka BUY: Ask > " + DoubleToString(safe_buy_price, 3) + "\n\n";
-   
-   // ==========================================
-   // 3. LOGIKA AVERAGING & TAKE PROFIT SELL (JALAN 24 JAM)
-   // ==========================================
+   // --- AVERAGING & TAKE PROFIT LOGIC (SELL) ---
    if(sell_count > 0 && sum_sell_volume > 0) 
      {
-      double bep_sell = sum_sell_value / sum_sell_volume; 
-      double target_price_sell;
+      double bep = sum_sell_value / sum_sell_volume; 
+      double tp = (sell_count == 1) ? bep - InpTakeProfitSingle : (sell_count >= InpAktifTPBEP2Posisi ? bep - InpTakeProfitBEP2 : bep - InpTakeProfitBEP1);
       
-      if(sell_count == 1) target_price_sell = bep_sell - InpTakeProfitSingle;
-      else if(sell_count >= InpAktifTPBEP2Posisi) target_price_sell = bep_sell - InpTakeProfitBEP2;
-      else target_price_sell = bep_sell - InpTakeProfitBEP1;
-        
-      double next_sell_price = last_sell_price + InpGridDistance;
-      
-      dashboard += "--- STATUS SELL ---\n";
-      dashboard += "Total Posisi: " + IntegerToString(sell_count) + "\n";
-      dashboard += "Harga Buka Selanjutnya: " + DoubleToString(next_sell_price, 3) + "\n";
-      dashboard += "Target Close (TP): " + DoubleToString(target_price_sell, 3) + "\n";
-      
-      if(last_sell_price > 0 && bid >= next_sell_price)
+      if(last_sell_price > 0 && bid >= last_sell_price + InpGridDistance) 
         {
-         double exact_calculated_lot = initial_sell_lot * MathPow(InpLotMultiplier, sell_count);
-         double new_lot = CalculateLot(exact_calculated_lot);
-         trade.Sell(new_lot, _Symbol, bid, 0, 0, "Auto Averaging Sell");
+         trade.Sell(CalculateLot(initial_sell_lot * MathPow(InpLotMultiplier, sell_count)), _Symbol, bid, 0, 0, "Averaging");
         }
-        
-      if(ask <= target_price_sell && target_price_sell > 0)
+      if(ask <= tp && tp > 0) 
         {
          CloseAll(POSITION_TYPE_SELL);
         }
      }
      
-   // ==========================================
-   // 4. LOGIKA AVERAGING & TAKE PROFIT BUY (JALAN 24 JAM)
-   // ==========================================
+   // --- AVERAGING & TAKE PROFIT LOGIC (BUY) ---
    if(buy_count > 0 && sum_buy_volume > 0)
      {
-      double bep_buy = sum_buy_value / sum_buy_volume; 
-      double target_price_buy;
+      double bep = sum_buy_value / sum_buy_volume; 
+      double tp = (buy_count == 1) ? bep + InpTakeProfitSingle : (buy_count >= InpAktifTPBEP2Posisi ? bep + InpTakeProfitBEP2 : bep + InpTakeProfitBEP1);
       
-      if(buy_count == 1) target_price_buy = bep_buy + InpTakeProfitSingle;
-      else if(buy_count >= InpAktifTPBEP2Posisi) target_price_buy = bep_buy + InpTakeProfitBEP2;
-      else target_price_buy = bep_buy + InpTakeProfitBEP1;
-        
-      double next_buy_price = last_buy_price - InpGridDistance;
-      
-      dashboard += "--- STATUS BUY ---\n";
-      dashboard += "Total Posisi: " + IntegerToString(buy_count) + "\n";
-      dashboard += "Harga Buka Selanjutnya: " + DoubleToString(next_buy_price, 3) + "\n";
-      dashboard += "Target Close (TP): " + DoubleToString(target_price_buy, 3) + "\n";
-      
-      if(last_buy_price > 0 && ask <= next_buy_price)
+      if(last_buy_price > 0 && ask <= last_buy_price - InpGridDistance) 
         {
-         double exact_calculated_lot = initial_buy_lot * MathPow(InpLotMultiplier, buy_count);
-         double new_lot = CalculateLot(exact_calculated_lot);
-         trade.Buy(new_lot, _Symbol, ask, 0, 0, "Auto Averaging Buy");
+         trade.Buy(CalculateLot(initial_buy_lot * MathPow(InpLotMultiplier, buy_count)), _Symbol, ask, 0, 0, "Averaging");
         }
-        
-      if(bid >= target_price_buy && target_price_buy > 0)
+      if(bid >= tp && tp > 0) 
         {
          CloseAll(POSITION_TYPE_BUY);
         }
@@ -230,8 +173,7 @@ void OnTick()
    Comment(dashboard);
   }
 
-// --- FUNGSI MENCARI SUPPORT & RESISTANCE (DENGAN OFFSET) ---
-
+// --- FUNGSI MENCARI RESISTANCE ---
 double GetResistance(int period, int offset)
   {
    double high[];
@@ -243,6 +185,7 @@ double GetResistance(int period, int offset)
    return 0;
   }
 
+// --- FUNGSI MENCARI SUPPORT ---
 double GetSupport(int period, int offset)
   {
    double low[];
@@ -254,8 +197,7 @@ double GetSupport(int period, int offset)
    return 0;
   }
 
-// --- FUNGSI TAMBAHAN (WAKTU & LOT) ---
-
+// --- FUNGSI KONVERSI WAKTU ---
 int TimeToMinutes(string time_str)
   {
    string arr[];
@@ -263,21 +205,27 @@ int TimeToMinutes(string time_str)
      {
       return (int)StringToInteger(arr[0]) * 60 + (int)StringToInteger(arr[1]);
      }
-   return 0; 
+   return 0;
   }
 
+// --- FUNGSI CEK SESI TRADING ---
 bool CheckSession(int current_min, int start_min, int end_min)
   {
-   if(start_min < end_min) return (current_min >= start_min && current_min <= end_min);
-   else return (current_min >= start_min || current_min <= end_min);
+   if(start_min < end_min)
+     {
+      return (current_min >= start_min && current_min <= end_min);
+     }
+   else
+     {
+      return (current_min >= start_min || current_min <= end_min);
+     }
   }
 
+// --- FUNGSI VALIDASI WAKTU TRADING ---
 bool IsTradingTime()
   {
-   datetime time_gmt = TimeGMT();
-   datetime time_wib = time_gmt + 25200; 
    MqlDateTime dt;
-   TimeToStruct(time_wib, dt); 
+   TimeToStruct(TimeGMT() + 25200, dt); // Offset +7 Jam untuk WIB
    int current_min = dt.hour * 60 + dt.min;
    
    if(InpUseAsia && CheckSession(current_min, AsiaStartMin, AsiaEndMin)) return true;
@@ -287,6 +235,7 @@ bool IsTradingTime()
    return false;
   }
 
+// --- FUNGSI TUTUP SEMUA POSISI (TAKE PROFIT) ---
 void CloseAll(long pos_type)
   {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -294,22 +243,22 @@ void CloseAll(long pos_type)
       ulong ticket = PositionGetTicket(i);
       if(PositionGetString(POSITION_SYMBOL) == _Symbol)
         {
-         ulong magic = PositionGetInteger(POSITION_MAGIC);
-         if(magic == 0 || magic == InpMagicNumber)
+         if((PositionGetInteger(POSITION_MAGIC) == 0 || PositionGetInteger(POSITION_MAGIC) == InpMagicNumber) && PositionGetInteger(POSITION_TYPE) == pos_type)
            {
-            if(PositionGetInteger(POSITION_TYPE) == pos_type) { trade.PositionClose(ticket); }
+            trade.PositionClose(ticket);
            }
         }
      }
   }
 
-double CalculateLot(double calculated_lot)
+// --- FUNGSI PERHITUNGAN LOT AMAN ---
+double CalculateLot(double calc_lot)
   {
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double max_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double final_lot = MathRound(calc_lot / step) * step;
    double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double final_lot = MathRound(calculated_lot / step) * step;
-   if(final_lot < min_lot) final_lot = min_lot;
-   if(final_lot > max_lot) final_lot = max_lot;
-   return final_lot;
+   double max_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   
+   return MathMax(min_lot, MathMin(final_lot, max_lot));
   }
+//+------------------------------------------------------------------+
