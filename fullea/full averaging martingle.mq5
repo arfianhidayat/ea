@@ -37,7 +37,7 @@ input string   InpUSStart            = "22:30";
 input string   InpUSEnd              = "01:30";  
 
 input group "=== SETTING SUPPORT & RESISTANCE ==="
-input int      InpSnRPeriod          = 10;       
+input int      InpSnRPeriod          = 50;       
 input int      InpSnROffset          = 4;        
 input double   InpSnRBuffer          = 3.0;      
 
