@@ -38,7 +38,7 @@ input string   InpUSEnd              = "01:30";
 
 input group "=== SETTING SUPPORT & RESISTANCE ==="
 input int      InpSnRPeriod          = 50;       
-input int      InpSnROffset          = 4;        
+input int      InpSnROffset          = 5;        
 input double   InpSnRBuffer          = 3.0;      
 
 CTrade trade;
