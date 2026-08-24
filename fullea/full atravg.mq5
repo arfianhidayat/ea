@@ -14,11 +14,11 @@ input int      InpATRPeriod          = 10;       // ATR Period
 input double   InpLotSize            = 0.01;     // Ukuran Lot Awal
 
 //--- 2. Inputs Martingale & Grid (Sistem Close/Averaging)
-input double   InpGridDistance       = 5.0;      // Jarak Averaging
-input double   InpTakeProfitSingle   = 5.0;      // TP jika HANYA 1 Posisi
-input double   InpTakeProfitBEP1     = 2.0;      // TP BEP 1 (Averaging Awal)
+input double   InpGridDistance       = 3.0;      // Jarak Averaging
+input double   InpTakeProfitSingle   = 1.5;      // TP jika HANYA 1 Posisi
+input double   InpTakeProfitBEP1     = 0.7;      // TP BEP 1 (Averaging Awal)
 input int      InpAktifTPBEP2Posisi  = 5;        // Aktif TP BEP 2 pada Posisi ke-
-input double   InpTakeProfitBEP2     = 1.0;      // TP BEP 2 (Averaging Lanjut)
+input double   InpTakeProfitBEP2     = 0.3;      // TP BEP 2 (Averaging Lanjut)
 input double   InpLotMultiplier      = 1.3;      // Multiplier Martingale
 input ulong    InpMagicNumber        = 88888;    // Magic Number EA
 
