@@ -9,11 +9,11 @@
 #include <Trade\Trade.mqh>
 
 //--- Input Parameters ---
-input double   InpGridDistance       = 5.0;      // Jarak Buka Posisi (Contoh: 5.0)
-input double   InpTakeProfitSingle   = 5.0;      // Take Profit jika HANYA 1 Posisi
-input double   InpTakeProfitBEP1     = 2.0;      // Take Profit BEP 1 (Averaging Awal)
+input double   InpGridDistance       = 4.0;      // Jarak Buka Posisi (Contoh: 5.0)
+input double   InpTakeProfitSingle   = 1.5;      // Take Profit jika HANYA 1 Posisi
+input double   InpTakeProfitBEP1     = 0.7;      // Take Profit BEP 1 (Averaging Awal)
 input int      InpAktifTPBEP2Posisi  = 5;        // Aktif TP BEP 2 pada Posisi ke-
-input double   InpTakeProfitBEP2     = 1.0;      // Take Profit BEP 2 (Averaging Lanjut)
+input double   InpTakeProfitBEP2     = 0.3;      // Take Profit BEP 2 (Averaging Lanjut)
 input double   InpLotMultiplier      = 1.3;      // Multiplier Martingale
 input ulong    InpMagicNumber        = 88888;    // Magic Number EA
 
