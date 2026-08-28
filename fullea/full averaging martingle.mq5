@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Auto_Martingale_Grid_BB_Mod.mq5 |
-//|                     Versi 4.0 (Sideways Filter + Grid Averaging) |
+//|              Versi 4.2 (Sideways + BB Zone + Spread/News Filter) |
 //+------------------------------------------------------------------+
 //| ALUR PROGRAM (dijalankan setiap tick):                           |
 //|                                                                  |
@@ -26,13 +26,43 @@
 //| 3. ENTRY AWAL (dua arah, Buy dan Sell diperiksa terpisah)        |
 //|    Buka Sell dgn InpInitialLot jika SEMUA terpenuhi:             |
 //|      - belum ada posisi Sell                                     |
-//|      - dalam sesi trading (Asia/Eropa/US, jam WIB)               |
+//|      - dalam sesi trading (Asia/Eropa/US, jam WIB); jika         |
+//|        InpUseSessionFilter = false, syarat ini selalu terpenuhi  |
+//|        (EA entry 24 jam)                                         |
 //|      - market sideways (3 filter di langkah 2 lolos semua)       |
+//|      - spread (ask - bid) <= InpMaxSpread (0 = tidak dicek)      |
+//|      - tidak dalam jendela berita (lihat FILTER NEWS di bawah)   |
+//|      - bid di dalam zona entry BB (lihat di bawah)               |
 //|    Buka Buy dgn InpInitialLot jika SEMUA terpenuhi:              |
 //|      - belum ada posisi Buy                                      |
 //|      - dalam sesi trading                                        |
 //|      - market sideways (3 filter di langkah 2 lolos semua)       |
+//|      - spread <= InpMaxSpread                                    |
+//|      - tidak dalam jendela berita                                |
+//|      - ask di dalam zona entry BB (lihat di bawah)               |
 //|    Buy dan Sell BISA terbuka bersamaan (hedging dua arah).       |
+//|                                                                  |
+//|    FILTER NEWS (InpUseNewsFilter), dua lapis, cukup satu kena:   |
+//|    a. Kalender ekonomi MT5: berita mata uang InpNewsCurrencies   |
+//|       berdampak HIGH (atau HIGH+MODERATE jika InpNewsHighOnly =  |
+//|       false). Entry ditahan dari InpNewsMinutesBefore sebelum    |
+//|       sampai InpNewsMinutesAfter sesudah waktu berita. Dicek     |
+//|       ulang tiap 60 detik. TIDAK tersedia di strategy tester.    |
+//|    b. Blackout manual InpBlackout1..3 ("HH:MM-HH:MM", WIB):      |
+//|       jendela tetap yang selalu berlaku, termasuk di tester.     |
+//|       Default: 20:15-21:00 (data US) dan 04:00-05:30 (rollover). |
+//|                                                                  |
+//|    ZONA ENTRY BB: harga harus berjarak minimal InpBBZonePct      |
+//|    (% dari lebar band) dari upper DAN lower band, yaitu:         |
+//|      lower + zona  <=  harga  <=  upper - zona                   |
+//|    Tujuannya mencegah Buy tepat di resistance / Sell tepat di    |
+//|    support, dan mencegah re-entry langsung di titik TP grid      |
+//|    sebelumnya (yang biasanya berada di tepi band).               |
+//|    Band yang dipakai = cache filter (candle tertutup).           |
+//|    InpBBZonePct = 0 menonaktifkan zona.                          |
+//|    InpDirectionalZone = true (opsional, default false):          |
+//|      Sell hanya jika bid >= middle, Buy hanya jika ask <= middle |
+//|      -> menghilangkan hedging, entry searah mean-reversion.      |
 //|                                                                  |
 //| 4. AVERAGING / MARTINGALE (per arah, tiap tick, tanpa filter     |
 //|    sideways dan tanpa filter sesi)                               |
@@ -52,21 +82,25 @@
 //|    Setelah tertutup, tick berikutnya kembali ke langkah 3.       |
 //|                                                                  |
 //| 6. DASHBOARD                                                     |
-//|    Comment() di chart: status sesi, nilai & status 3 filter      |
-//|    sideways, dan untuk tiap arah: jumlah posisi, total lot,      |
+//|    Comment() di chart: status sesi, bid/ask/spread + status,     |
+//|    status news (berita aktif / berikutnya / blackout), nilai &   |
+//|    status 3 filter sideways, batas zona entry BB & posisi harga  |
+//|    di dalamnya, dan untuk tiap arah: jumlah posisi, total lot,   |
 //|    floating, harga averaging berikutnya, BEP, dan target TP.     |
 //|                                                                  |
 //| CATATAN:                                                         |
 //| - Tidak ada Stop Loss. Risiko dibatasi hanya oleh InpMaxPositions|
-//| - Semua satuan jarak (grid, TP) dalam satuan HARGA mentah,       |
-//|   bukan pips. Lebar BB dalam persen, ER tanpa satuan (0-1).      |
+//| - Semua satuan jarak (grid, TP, spread) dalam satuan HARGA       |
+//|   mentah, bukan pips. Lebar BB dalam persen, ER tanpa satuan.    |
+//| - Waktu berita dari kalender memakai waktu SERVER broker;        |
+//|   sesi dan blackout manual memakai WIB (GMT+7).                  |
 //| - EA tidak bergantung pada timeframe chart; semua indikator      |
 //|   memakai timeframe eksplisit dari input.                        |
 //| - Semua order dicek hasilnya; jika gagal dicetak ke log Expert.  |
 //+------------------------------------------------------------------+
 #property copyright "Strategi Trading"
 #property link      "https://www.mql5.com"
-#property version   "4.00"
+#property version   "4.20"
 
 #include <Trade\Trade.mqh>
 
@@ -91,21 +125,49 @@ input ENUM_TIMEFRAMES InpADXTimeFrame = PERIOD_H1; // Timeframe ADX (konteks tre
 input int      InpADXPeriod          = 14;         // Periode ADX
 input double   InpMaxADX             = 25.0;       // Maks ADX (di bawah ini = tidak ada tren kuat)
 
+input group "=== ZONA ENTRY BOLLINGER BANDS ==="
+input double   InpBBZonePct          = 20.0;       // Jarak minimal dari tepi BB (% lebar band), 0 = nonaktif
+input bool     InpDirectionalZone    = false;      // true: Sell hanya di atas middle, Buy hanya di bawah middle
+
 input group "=== AKTIVASI SESI TRADING ==="
-input bool     InpUseAsia            = true;     
-input bool     InpUseEropa           = true;     
-input bool     InpUseUS              = true;     
-input string   InpAsiaStart          = "09:30";  
-input string   InpAsiaEnd            = "12:30";  
+input bool     InpUseSessionFilter   = true;     // true: entry hanya di sesi di bawah | false: entry 24 jam
+input bool     InpUseAsia            = true;
+input bool     InpUseEropa           = false;     
+input bool     InpUseUS              = false;     
+input string   InpAsiaStart          = "07:00";  
+input string   InpAsiaEnd            = "14:00";  
 input string   InpEropaStart         = "15:30";  
 input string   InpEropaEnd           = "17:30";  
-input string   InpUSStart            = "22:30";  
+input string   InpUSStart            = "22:30";
 input string   InpUSEnd              = "01:30";
+
+input group "=== FILTER SPREAD ==="
+input double   InpMaxSpread          = 0.4;      // Maks spread (satuan harga) untuk entry awal, 0 = nonaktif
+
+input group "=== FILTER NEWS (Kalender Ekonomi MT5) ==="
+input bool     InpUseNewsFilter      = true;     // Aktifkan filter berita
+input string   InpNewsCurrencies     = "USD";    // Mata uang yang dipantau, pisahkan koma (mis. "USD,EUR")
+input bool     InpNewsHighOnly       = true;     // true: hanya dampak tinggi | false: tinggi + sedang
+input int      InpNewsMinutesBefore  = 30;       // Tahan entry X menit sebelum berita
+input int      InpNewsMinutesAfter   = 30;       // Tahan entry X menit sesudah berita
+input string   InpBlackout1          = "20:15-21:00"; // Jendela larangan manual WIB (cadangan, aktif juga di tester)
+input string   InpBlackout2          = "04:00-05:30"; // Jendela larangan manual WIB
+input string   InpBlackout3          = "";       // Jendela larangan manual WIB (kosong = tidak dipakai)
 
 CTrade trade;
 
 int AsiaStartMin, AsiaEndMin, EropaStartMin, EropaEndMin, USStartMin, USEndMin;
 int bb_handle, adx_handle;
+
+// Jendela blackout manual (menit WIB), -1 = tidak dipakai
+int blackout_start[3] = {-1, -1, -1}, blackout_end[3] = {-1, -1, -1};
+
+// Cache filter news, diperbarui tiap 60 detik
+datetime news_last_check = 0;
+bool     news_active = false;          // sedang dalam jendela before/after sebuah berita
+bool     news_calendar_ok = false;     // kalender berhasil diakses (false di tester / offline)
+string   news_active_name = "", news_next_name = "";
+datetime news_active_time = 0, news_next_time = 0;
 
 // Cache hasil filter sideways, diperbarui hanya saat candle InpFilterTimeFrame baru
 datetime filter_last_bar = 0;
@@ -124,7 +186,11 @@ int OnInit()
    AsiaStartMin = TimeToMinutes(InpAsiaStart); AsiaEndMin = TimeToMinutes(InpAsiaEnd);
    EropaStartMin = TimeToMinutes(InpEropaStart); EropaEndMin = TimeToMinutes(InpEropaEnd);
    USStartMin = TimeToMinutes(InpUSStart); USEndMin = TimeToMinutes(InpUSEnd);
-   
+
+   ParseBlackout(InpBlackout1, 0);
+   ParseBlackout(InpBlackout2, 1);
+   ParseBlackout(InpBlackout3, 2);
+
    // Inisialisasi Indikator Filter
    bb_handle = iBands(_Symbol, InpFilterTimeFrame, InpBBPeriod, 0, InpBBDeviation, PRICE_CLOSE);
    if(bb_handle == INVALID_HANDLE) { Print("Gagal memuat indikator BB"); return(INIT_FAILED); }
@@ -179,13 +245,37 @@ void OnTick()
    bool is_trading_time = IsTradingTime();
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID), ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
-   if(sell_count == 0 && is_trading_time && is_sideways)
+   // Zona entry: harga harus berjarak minimal InpBBZonePct dari kedua tepi BB
+   double bb_width   = filter_bb_upper - filter_bb_lower;
+   double zone_upper = filter_bb_upper - bb_width * InpBBZonePct / 100.0;
+   double zone_lower = filter_bb_lower + bb_width * InpBBZonePct / 100.0;
+   bool   zone_ready = (bb_width > 0);
+
+   bool sell_zone_ok = zone_ready && bid <= zone_upper && bid >= zone_lower;
+   bool buy_zone_ok  = zone_ready && ask <= zone_upper && ask >= zone_lower;
+   if(InpDirectionalZone)
+     {
+      sell_zone_ok = sell_zone_ok && bid >= filter_bb_middle;
+      buy_zone_ok  = buy_zone_ok  && ask <= filter_bb_middle;
+     }
+
+   // Filter spread & news (hanya untuk entry awal)
+   double spread = ask - bid;
+   bool spread_ok = (InpMaxSpread <= 0 || spread <= InpMaxSpread);
+
+   UpdateNewsFilter();
+   bool in_blackout = IsManualBlackout();
+   bool news_ok = !InpUseNewsFilter || (!news_active && !in_blackout);
+
+   bool entry_allowed = is_trading_time && is_sideways && spread_ok && news_ok;
+
+   if(sell_count == 0 && entry_allowed && sell_zone_ok)
      {
       if(!trade.Sell(CalculateLot(InpInitialLot), _Symbol, bid, 0, 0, "First Auto Sell"))
          Print("Gagal First Auto Sell: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
      }
 
-   if(buy_count == 0 && is_trading_time && is_sideways)
+   if(buy_count == 0 && entry_allowed && buy_zone_ok)
      {
       if(!trade.Buy(CalculateLot(InpInitialLot), _Symbol, ask, 0, 0, "First Auto Buy"))
          Print("Gagal First Auto Buy: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
@@ -195,9 +285,24 @@ void OnTick()
    string tf_filter = EnumToString(InpFilterTimeFrame);
    string tf_adx    = EnumToString(InpADXTimeFrame);
 
-   string dashboard = "=== EA MARTINGALE (SIDEWAYS FILTER) v4.0 ===\n";
-   dashboard += "Server: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + " | Sesi WIB: " + (string)(is_trading_time ? "ON" : "OFF") + "\n";
-   dashboard += "Bid: " + DoubleToString(bid, _Digits) + " | Ask: " + DoubleToString(ask, _Digits) + " | Spread: " + DoubleToString(ask - bid, _Digits) + "\n\n";
+   string dashboard = "=== EA MARTINGALE (SIDEWAYS FILTER) v4.2 ===\n";
+   dashboard += "Server: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + " | Sesi: " + (InpUseSessionFilter ? (string)(is_trading_time ? "ON (WIB)" : "OFF (WIB)") : "24 JAM") + "\n";
+   dashboard += "Bid: " + DoubleToString(bid, _Digits) + " | Ask: " + DoubleToString(ask, _Digits) + " | Spread: " + DoubleToString(spread, _Digits);
+   dashboard += (InpMaxSpread > 0 ? " (maks " + DoubleToString(InpMaxSpread, _Digits) + ") " + (spread_ok ? "[OK]" : "[X]") : " (filter off)") + "\n\n";
+
+   dashboard += "--- FILTER NEWS ---\n";
+   if(!InpUseNewsFilter)
+      dashboard += "Nonaktif\n";
+   else
+     {
+      dashboard += "Kalender: " + (news_calendar_ok ? "aktif (" + InpNewsCurrencies + ", " + (InpNewsHighOnly ? "HIGH" : "HIGH+MED") + ")" : "TIDAK TERSEDIA (tester/offline) - hanya blackout manual") + "\n";
+      if(news_active)
+         dashboard += "SEDANG BERITA: " + news_active_name + " @ " + TimeToString(news_active_time, TIME_MINUTES) + " server  [X]\n";
+      else if(news_calendar_ok)
+         dashboard += "Berita berikutnya: " + (news_next_time > 0 ? news_next_name + " @ " + TimeToString(news_next_time, TIME_DATE|TIME_MINUTES) + " server" : "tidak ada dalam 24 jam") + "  [OK]\n";
+      dashboard += "Blackout manual WIB: " + InpBlackout1 + (InpBlackout2 != "" ? ", " + InpBlackout2 : "") + (InpBlackout3 != "" ? ", " + InpBlackout3 : "") + "  " + (in_blackout ? "[X AKTIF]" : "[OK]") + "\n";
+     }
+   dashboard += "\n";
 
    dashboard += "--- FILTER SIDEWAYS (update: " + TimeToString(filter_last_bar, TIME_DATE|TIME_MINUTES) + ") ---\n";
    dashboard += "[1] Bollinger Bands " + tf_filter + " (" + IntegerToString(InpBBPeriod) + ", " + DoubleToString(InpBBDeviation, 1) + ")\n";
@@ -212,6 +317,12 @@ void OnTick()
    dashboard += "    +DI: " + DoubleToString(filter_di_plus, 1) + " | -DI: " + DoubleToString(filter_di_minus, 1) + " | Arah: " + (filter_di_plus > filter_di_minus ? "NAIK" : "TURUN") + "\n";
    dashboard += "    ADX   : " + DoubleToString(filter_adx, 1) + "  (maks " + DoubleToString(InpMaxADX, 1) + ")  " + (filter_adx_ok ? "[OK]" : "[X]") + "\n";
    dashboard += ">> STATUS: " + (string)(is_sideways ? "SIDEWAYS - Entry Diizinkan" : "TRENDING - Entry Ditahan") + "\n\n";
+
+   dashboard += "--- ZONA ENTRY BB (" + DoubleToString(InpBBZonePct, 0) + "% dari tepi" + (InpDirectionalZone ? ", arah terpisah" : ", hedging") + ") ---\n";
+   dashboard += "Batas Atas : " + DoubleToString(zone_upper, _Digits) + "\n";
+   dashboard += "Batas Bawah: " + DoubleToString(zone_lower, _Digits) + "\n";
+   dashboard += "Posisi Harga: " + (bb_width > 0 ? DoubleToString((bid - filter_bb_lower) / bb_width * 100.0, 1) + "% dari lower" : "-") + "\n";
+   dashboard += "Sell: " + (sell_zone_ok ? "[ZONA OK]" : "[DI LUAR ZONA]") + " | Buy: " + (buy_zone_ok ? "[ZONA OK]" : "[DI LUAR ZONA]") + "\n\n";
    
    // --- AVERAGING & TAKE PROFIT LOGIC (SELL) ---
    if(sell_count > 0 && sum_sell_volume > 0)
@@ -348,6 +459,99 @@ void UpdateSidewaysFilter()
    filter_last_bar = current_bar;
   }
 
+// --- FUNGSI FILTER NEWS: cek kalender ekonomi MT5 (refresh tiap 60 detik) ---
+// Kalender tidak tersedia di strategy tester; saat itu hanya blackout manual yang bekerja.
+void UpdateNewsFilter()
+  {
+   if(!InpUseNewsFilter) return;
+
+   datetime now = TimeCurrent();
+   if(news_last_check > 0 && now - news_last_check < 60) return;
+   news_last_check = now;
+
+   news_active = false;
+   news_active_name = ""; news_active_time = 0;
+   news_next_name = "";   news_next_time = 0;
+
+   if(MQLInfoInteger(MQL_TESTER)) { news_calendar_ok = false; return; }
+
+   string currencies[];
+   int n_cur = StringSplit(InpNewsCurrencies, ',', currencies);
+   if(n_cur <= 0) { news_calendar_ok = false; return; }
+
+   datetime from = now - InpNewsMinutesAfter * 60;
+   datetime to   = now + 24 * 3600;
+   bool any_ok = false;
+
+   for(int c = 0; c < n_cur; c++)
+     {
+      string cur = currencies[c];
+      StringTrimLeft(cur); StringTrimRight(cur);
+      if(cur == "") continue;
+
+      MqlCalendarValue values[];
+      if(!CalendarValueHistory(values, from, to, NULL, cur)) continue;
+      any_ok = true;
+
+      for(int i = 0; i < ArraySize(values); i++)
+        {
+         MqlCalendarEvent ev;
+         if(!CalendarEventById(values[i].event_id, ev)) continue;
+
+         bool important = (ev.importance == CALENDAR_IMPORTANCE_HIGH) ||
+                          (!InpNewsHighOnly && ev.importance == CALENDAR_IMPORTANCE_MODERATE);
+         if(!important) continue;
+
+         datetime t = values[i].time;
+
+         // Sedang dalam jendela larangan sebuah berita
+         if(t - InpNewsMinutesBefore * 60 <= now && now <= t + InpNewsMinutesAfter * 60)
+           {
+            if(!news_active || t < news_active_time)
+              { news_active = true; news_active_time = t; news_active_name = cur + " " + ev.name; }
+           }
+         // Berita berikutnya (untuk dashboard)
+         else if(t > now && (news_next_time == 0 || t < news_next_time))
+           { news_next_time = t; news_next_name = cur + " " + ev.name; }
+        }
+     }
+
+   news_calendar_ok = any_ok;
+  }
+
+// --- FUNGSI PARSE JENDELA BLACKOUT "HH:MM-HH:MM" ---
+void ParseBlackout(string window, int idx)
+  {
+   blackout_start[idx] = -1; blackout_end[idx] = -1;
+   string parts[];
+   if(StringSplit(window, '-', parts) != 2) return;
+   StringTrimLeft(parts[0]); StringTrimRight(parts[0]);
+   StringTrimLeft(parts[1]); StringTrimRight(parts[1]);
+   if(parts[0] == "" || parts[1] == "") return;
+   blackout_start[idx] = TimeToMinutes(parts[0]);
+   blackout_end[idx]   = TimeToMinutes(parts[1]);
+  }
+
+// --- FUNGSI CEK BLACKOUT MANUAL (WIB) ---
+bool IsManualBlackout()
+  {
+   int current_min = CurrentMinuteWIB();
+   for(int i = 0; i < 3; i++)
+     {
+      if(blackout_start[i] < 0) continue;
+      if(CheckSession(current_min, blackout_start[i], blackout_end[i])) return true;
+     }
+   return false;
+  }
+
+// --- FUNGSI MENIT SAAT INI DALAM WIB (GMT+7) ---
+int CurrentMinuteWIB()
+  {
+   MqlDateTime dt;
+   TimeToStruct(TimeGMT() + 25200, dt);
+   return dt.hour * 60 + dt.min;
+  }
+
 // --- FUNGSI KONVERSI WAKTU ---
 int TimeToMinutes(string time_str)
   {
@@ -375,10 +579,10 @@ bool CheckSession(int current_min, int start_min, int end_min)
 // --- FUNGSI VALIDASI WAKTU TRADING ---
 bool IsTradingTime()
   {
-   MqlDateTime dt;
-   TimeToStruct(TimeGMT() + 25200, dt); // Offset +7 Jam untuk WIB
-   int current_min = dt.hour * 60 + dt.min;
-   
+   if(!InpUseSessionFilter) return true; // Mode 24 jam: semua waktu dianggap sesi aktif
+
+   int current_min = CurrentMinuteWIB();
+
    if(InpUseAsia && CheckSession(current_min, AsiaStartMin, AsiaEndMin)) return true;
    if(InpUseEropa && CheckSession(current_min, EropaStartMin, EropaEndMin)) return true;
    if(InpUseUS && CheckSession(current_min, USStartMin, USEndMin)) return true;
