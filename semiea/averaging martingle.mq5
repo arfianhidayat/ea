@@ -1,38 +1,33 @@
 //+------------------------------------------------------------------+
-//|                                     SemiAuto_Martingale_Grid.mq5 |
-//|                                     Versi 2.3 (Pro Scalper M1)   |
+//|                                          SemiAuto_Grid_Flat.mq5  |
+//|                                     Versi 2.4 (Grid Flat Lot)    |
 //+------------------------------------------------------------------+
-//| CARA KERJA EA (PRO SCALPING M1):                                 |
+//| CARA KERJA EA (SEMI-OTOMATIS):                                   |
 //| 1. Posisi Pertama (Initial Trade): Dibuka secara manual oleh     |
-//|    user. EA akan mengambil alih jika posisi tersebut floating -. |
-//| 2. Jarak Averaging Dinamis: Menggunakan multiplier jarak agar    |
-//|    jarak antar posisi makin melebar jika tren berlawanan kuat.   |
-//| 3. Smart SnR Filter (Anti-Breakout):                             |
-//|    - Buka averaging HANYA jika harga menyentuh Support/Resistance|
-//|    - Periode SnR dilipatgandakan sesuai jumlah posisi (Posisi ke-|
-//|      3 melihat SnR lebih jauh dibanding posisi ke-2).            |
-//|    - SnR HANYA melihat data historis SEBELUM posisi pertama      |
-//|      terbuka, sehingga kebal terhadap tipuan candle breakout.    |
+//|    user (magic 0) atau oleh EA ini. EA mengelola semua posisi    |
+//|    di simbol ini yang ber-magic 0 atau InpMagicNumber.           |
+//| 2. Jarak Averaging Dinamis: jarak level ke-N =                   |
+//|    InpGridDistance x InpGridMultiplier^(N-1), makin melebar.     |
+//| 3. Lot Averaging FLAT: setiap posisi tambahan memakai lot yang   |
+//|    sama dengan posisi pertama (tanpa martingale).                |
 //| 4. Multi-Level Take Profit: TP mengecil secara bertahap (Single, |
 //|    Averaging, dan Rescue) agar cepat lolos dari market.          |
+//| 5. Semua order dicek hasilnya; jika gagal dicetak ke log Expert. |
 //+------------------------------------------------------------------+
 #property copyright "Strategi Trading"
 #property link      "https://www.mql5.com"
-#property version   "2.30" // Update versi: Pro Scalper M1 & Dynamic SnR
+#property version   "2.40"
 
 #include <Trade\Trade.mqh>
 
-//--- Input Parameters (SETINGAN SCALPING M1) ---
-input double   InpGridDistance       = 4.0;      // Jarak Buka Posisi Awal (Lebih rapat)
-input double   InpGridMultiplier     = 1.4;      // Pengali Jarak (Cepat melebar agar aman)
-input int      InpMaxPositions       = 99;        // Maksimal Posisi Averaging (Batas Aman)
-input int      InpSnRPeriod          = 15;       // Periode SnR M1 (15 Menit terakhir)
-input double   InpSnRTolerance       = 0.5;      // Toleransi SnR diperkecil
-input double   InpTakeProfitSingle   = 1.5;      // TP Posisi Tunggal (Sangat Kecil & Cepat)
-input double   InpTakeProfitBEP1     = 0.7;      // TP Averaging Awal (Cepat Keluar)
-input int      InpAktifTPBEP2Posisi  = 4;        // Aktif TP Rescue pada Posisi ke-
-input double   InpTakeProfitBEP2     = 0.4;     // TP Penyelamatan (Hanya Balik Modal + Extra Tipis)
-input double   InpLotMultiplier      = 1.3;      // Multiplier Martingale
+//--- Input Parameters ---
+input double   InpGridDistance       = 2.0;      // Jarak Averaging Dasar (satuan harga)
+input double   InpGridMultiplier     = 1.2;      // Pengali Jarak per level (melebar)
+input int      InpMaxPositions       = 99;       // Maksimal Posisi per arah
+input double   InpTakeProfitSingle   = 1.0;      // TP jika hanya 1 posisi
+input double   InpTakeProfitBEP1     = 0.8;      // TP dari BEP saat averaging (BEP 1)
+input int      InpAktifTPBEP2Posisi  = 4;        // Aktif TP Rescue mulai posisi ke-
+input double   InpTakeProfitBEP2     = 0.6;      // TP dari BEP mode Rescue (BEP 2)
 input ulong    InpMagicNumber        = 88888;    // Magic Number EA
 
 CTrade trade;
@@ -42,6 +37,11 @@ int OnInit()
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(50); // Toleransi slippage
    return(INIT_SUCCEEDED);
+  }
+
+void OnDeinit(const int reason)
+  {
+   Comment("");
   }
 
 void OnTick()
@@ -99,7 +99,7 @@ void OnTick()
      }
      
    // --- DASHBOARD DIAGNOSTIK ---
-   string dashboard = "=== EA PRO SCALPER M1 ===\n";
+   string dashboard = "=== EA SEMI-AUTO GRID (FLAT LOT) v2.4 ===\n";
    dashboard += "Jarak Dasar: " + DoubleToString(InpGridDistance, 2) + " | TP: " + DoubleToString(InpTakeProfitSingle, 2) + " / " + DoubleToString(InpTakeProfitBEP1, 2) + " / " + DoubleToString(InpTakeProfitBEP2, 2) + "\n";
    dashboard += "==================================\n";
    dashboard += "Balance      : $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n";
@@ -138,40 +138,31 @@ void OnTick()
       double current_dynamic_distance = InpGridDistance * MathPow(InpGridMultiplier, sell_count - 1);
       double next_sell_price = last_sell_price + current_dynamic_distance;
       double current_distance = bid - last_sell_price;
-      
-      // Hitung Periode SnR Dinamis
-      int current_snr_period = InpSnRPeriod * sell_count;
-      
-      // Hitung Resistance untuk Filter SnR
-      double current_resistance = GetHighestHigh(_Symbol, PERIOD_CURRENT, current_snr_period, oldest_sell_time);
-      bool is_near_resistance = (bid >= (current_resistance - InpSnRTolerance));
-      
+
       dashboard += "--- STATUS SELL ---\n";
       dashboard += "Total Posisi: " + IntegerToString(sell_count) + " / " + IntegerToString(InpMaxPositions) + " (" + tp_mode_sell + ")\n";
       dashboard += "Total Lot: " + DoubleToString(sum_sell_volume, 2) + " | Floating: $" + DoubleToString(floating_sell, 2) + "\n";
       dashboard += "Waktu Trade Awal: " + TimeToString(oldest_sell_time, TIME_DATE|TIME_MINUTES) + "\n";
-      dashboard += "Harga Open Terakhir: " + DoubleToString(last_sell_price, 3) + "\n";
-      dashboard += "Syarat Jarak Buka Berikutnya: " + DoubleToString(next_sell_price, 3) + "\n";
-      dashboard += "Resistance (SnR " + IntegerToString(current_snr_period) + " Candle): " + DoubleToString(current_resistance, 3) + (is_near_resistance ? " [TERCAPAI]" : "") + "\n";
-      dashboard += "Harga Market Saat Ini: " + DoubleToString(bid, 3) + "\n";
-      dashboard += "Jarak Floating Saat Ini: " + DoubleToString(current_distance, 3) + "\n";
-      dashboard += "Harga BEP Rata-rata: " + DoubleToString(bep_sell, 3) + "\n";
-      dashboard += "Target Close (TP) di Harga: " + DoubleToString(target_price_sell, 3) + "\n";
-      
-      // Buka Posisi Martingale Baru 
-      if(sell_count < InpMaxPositions && bid >= next_sell_price && is_near_resistance)
+      dashboard += "Harga Open Terakhir: " + DoubleToString(last_sell_price, _Digits) + "\n";
+      dashboard += "Syarat Jarak Buka Berikutnya: " + DoubleToString(next_sell_price, _Digits) + "\n";
+      dashboard += "Harga Market Saat Ini: " + DoubleToString(bid, _Digits) + "\n";
+      dashboard += "Jarak Floating Saat Ini: " + DoubleToString(current_distance, _Digits) + "\n";
+      dashboard += "Harga BEP Rata-rata: " + DoubleToString(bep_sell, _Digits) + "\n";
+      dashboard += "Target Close (TP) di Harga: " + DoubleToString(target_price_sell, _Digits) + "\n";
+
+      // Buka Posisi Averaging Baru
+      if(sell_count < InpMaxPositions && bid >= next_sell_price)
         {
-         // Rumus: Lot Awal * (Multiplier ^ Jumlah Posisi Saat Ini)
-         double exact_calculated_lot = initial_sell_lot * MathPow(InpLotMultiplier, sell_count);
-         double new_lot = CalculateLot(exact_calculated_lot);
-         trade.Sell(new_lot, _Symbol, bid, 0, 0, "Auto Averaging Sell");
+         // Lot averaging sama dengan lot posisi pertama
+         double new_lot = CalculateLot(initial_sell_lot);
+         if(!trade.Sell(new_lot, _Symbol, bid, 0, 0, "Auto Averaging Sell"))
+            Print("Gagal Averaging Sell: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
         }
-        
+
       // Tutup Semua Posisi Saat Harga Turun ke Target
       if(ask <= target_price_sell)
         {
          CloseAll(POSITION_TYPE_SELL);
-         sell_count = 0; 
         }
      }
      
@@ -206,40 +197,31 @@ void OnTick()
       double current_dynamic_distance = InpGridDistance * MathPow(InpGridMultiplier, buy_count - 1);
       double next_buy_price = last_buy_price - current_dynamic_distance;
       double current_distance = last_buy_price - ask;
-      
-      // Hitung Periode SnR Dinamis
-      int current_snr_period = InpSnRPeriod * buy_count;
-      
-      // Hitung Support untuk Filter SnR
-      double current_support = GetLowestLow(_Symbol, PERIOD_CURRENT, current_snr_period, oldest_buy_time);
-      bool is_near_support = (ask <= (current_support + InpSnRTolerance));
-      
+
       dashboard += "--- STATUS BUY ---\n";
       dashboard += "Total Posisi: " + IntegerToString(buy_count) + " / " + IntegerToString(InpMaxPositions) + " (" + tp_mode_buy + ")\n";
       dashboard += "Total Lot: " + DoubleToString(sum_buy_volume, 2) + " | Floating: $" + DoubleToString(floating_buy, 2) + "\n";
       dashboard += "Waktu Trade Awal: " + TimeToString(oldest_buy_time, TIME_DATE|TIME_MINUTES) + "\n";
-      dashboard += "Harga Open Terakhir: " + DoubleToString(last_buy_price, 3) + "\n";
-      dashboard += "Syarat Jarak Buka Berikutnya: " + DoubleToString(next_buy_price, 3) + "\n";
-      dashboard += "Support (SnR " + IntegerToString(current_snr_period) + " Candle): " + DoubleToString(current_support, 3) + (is_near_support ? " [TERCAPAI]" : "") + "\n";
-      dashboard += "Harga Market Saat Ini: " + DoubleToString(ask, 3) + "\n";
-      dashboard += "Jarak Floating Saat Ini: " + DoubleToString(current_distance, 3) + "\n";
-      dashboard += "Harga BEP Rata-rata: " + DoubleToString(bep_buy, 3) + "\n";
-      dashboard += "Target Close (TP) di Harga: " + DoubleToString(target_price_buy, 3) + "\n";
-      
-      // Buka Posisi Martingale Baru 
-      if(buy_count < InpMaxPositions && ask <= next_buy_price && is_near_support)
+      dashboard += "Harga Open Terakhir: " + DoubleToString(last_buy_price, _Digits) + "\n";
+      dashboard += "Syarat Jarak Buka Berikutnya: " + DoubleToString(next_buy_price, _Digits) + "\n";
+      dashboard += "Harga Market Saat Ini: " + DoubleToString(ask, _Digits) + "\n";
+      dashboard += "Jarak Floating Saat Ini: " + DoubleToString(current_distance, _Digits) + "\n";
+      dashboard += "Harga BEP Rata-rata: " + DoubleToString(bep_buy, _Digits) + "\n";
+      dashboard += "Target Close (TP) di Harga: " + DoubleToString(target_price_buy, _Digits) + "\n";
+
+      // Buka Posisi Averaging Baru
+      if(buy_count < InpMaxPositions && ask <= next_buy_price)
         {
-         // Rumus: Lot Awal * (Multiplier ^ Jumlah Posisi Saat Ini)
-         double exact_calculated_lot = initial_buy_lot * MathPow(InpLotMultiplier, buy_count);
-         double new_lot = CalculateLot(exact_calculated_lot);
-         trade.Buy(new_lot, _Symbol, ask, 0, 0, "Auto Averaging Buy");
+         // Lot averaging sama dengan lot posisi pertama
+         double new_lot = CalculateLot(initial_buy_lot);
+         if(!trade.Buy(new_lot, _Symbol, ask, 0, 0, "Auto Averaging Buy"))
+            Print("Gagal Averaging Buy: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
         }
-        
+
       // Tutup Semua Posisi Saat Harga Naik ke Target
       if(bid >= target_price_buy)
         {
          CloseAll(POSITION_TYPE_BUY);
-         buy_count = 0; 
         }
      }
      
@@ -256,7 +238,11 @@ void CloseAll(long pos_type)
          ulong magic = PositionGetInteger(POSITION_MAGIC);
          if(magic == 0 || magic == InpMagicNumber)
            {
-            if(PositionGetInteger(POSITION_TYPE) == pos_type) { trade.PositionClose(ticket); }
+            if(PositionGetInteger(POSITION_TYPE) == pos_type)
+              {
+               if(!trade.PositionClose(ticket))
+                  Print("Gagal close ticket ", ticket, ": ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+              }
            }
         }
      }
@@ -271,51 +257,5 @@ double CalculateLot(double calculated_lot)
    if(final_lot < min_lot) final_lot = min_lot;
    if(final_lot > max_lot) final_lot = max_lot;
    return final_lot;
-  }
-
-//+------------------------------------------------------------------+
-//| Fungsi Bantuan: Mendapatkan Harga Tertinggi (Resistance)         |
-//+------------------------------------------------------------------+
-double GetHighestHigh(string symbol, ENUM_TIMEFRAMES timeframe, int period, datetime ref_time)
-  {
-   int shift = 1; // Default
-   if(ref_time > 0)
-     {
-      shift = iBarShift(symbol, timeframe, ref_time);
-      if(shift < 0) shift = 0;
-     }
-     
-   double high[];
-   ArraySetAsSeries(high, true);
-   int copied = CopyHigh(symbol, timeframe, shift + 1, period, high); // Dimulai sebelum candle posisi pertama
-   if(copied > 0)
-     {
-      int max_idx = ArrayMaximum(high, 0, copied);
-      return high[max_idx];
-     }
-   return 0;
-  }
-
-//+------------------------------------------------------------------+
-//| Fungsi Bantuan: Mendapatkan Harga Terendah (Support)             |
-//+------------------------------------------------------------------+
-double GetLowestLow(string symbol, ENUM_TIMEFRAMES timeframe, int period, datetime ref_time)
-  {
-   int shift = 1; // Default
-   if(ref_time > 0)
-     {
-      shift = iBarShift(symbol, timeframe, ref_time);
-      if(shift < 0) shift = 0;
-     }
-     
-   double low[];
-   ArraySetAsSeries(low, true);
-   int copied = CopyLow(symbol, timeframe, shift + 1, period, low); // Dimulai sebelum candle posisi pertama
-   if(copied > 0)
-     {
-      int min_idx = ArrayMinimum(low, 0, copied);
-      return low[min_idx];
-     }
-   return 0;
   }
 

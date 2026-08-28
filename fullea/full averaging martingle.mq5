@@ -20,8 +20,16 @@
 //|       jumlah |close[i] - close[i-1]| selama N candle             |
 //|       di InpFilterTimeFrame, harus < InpMaxER                    |
 //|       -> menolak harga yang bergerak lurus (tren pelan pun kena) |
-//|    c. ADX di InpADXTimeFrame (default H1), harus < InpMaxADX     |
-//|       -> menolak tren kuat di timeframe lebih besar              |
+//|    c. Arah tren di InpADXTimeFrame (default M30, periode 20 agar |
+//|       cakupan waktu setara H1/14 tapi update tiap 30 menit):     |
+//|       - |+DI - -DI| < InpMaxDISpread  (kondisi utama)            |
+//|         DI hanya di-smoothing sekali -> jauh lebih responsif     |
+//|         daripada ADX; spread kecil = tidak ada arah dominan      |
+//|       - BUKAN (ADX naik 3 candle berturut DAN ADX >              |
+//|         InpADXRiseFloor)  (rem: tren sedang membangun)           |
+//|       Level ADX absolut TIDAK dipakai sebagai ambang karena      |
+//|       lag-nya 2x periode: tinggi saat tren sudah usai, rendah    |
+//|       saat tren baru mulai.                                      |
 //|                                                                  |
 //| 3. ENTRY AWAL (dua arah, Buy dan Sell diperiksa terpisah)        |
 //|    Buka Sell dgn InpInitialLot jika SEMUA terpenuhi:             |
@@ -121,9 +129,10 @@ input double   InpBBDeviation        = 2.0;        // Deviasi BB
 input double   InpMaxBBWidthPct      = 0.8;        // Maks Lebar BB (% dari harga tengah)
 input int      InpERPeriod           = 20;         // Periode Efficiency Ratio
 input double   InpMaxER              = 0.3;        // Maks Efficiency Ratio (0=sideways, 1=trending)
-input ENUM_TIMEFRAMES InpADXTimeFrame = PERIOD_H1; // Timeframe ADX (konteks tren besar)
-input int      InpADXPeriod          = 14;         // Periode ADX
-input double   InpMaxADX             = 25.0;       // Maks ADX (di bawah ini = tidak ada tren kuat)
+input ENUM_TIMEFRAMES InpADXTimeFrame = PERIOD_M30; // Timeframe ADX/DI (konteks tren besar)
+input int      InpADXPeriod          = 20;         // Periode ADX/DI (20 di M30 ~ cakupan 14 di H1)
+input double   InpMaxDISpread        = 12.0;       // Maks |+DI - -DI| (kecil = tidak ada arah dominan)
+input double   InpADXRiseFloor       = 15.0;       // Rem: tolak jika ADX naik 3 candle berturut DAN ADX > nilai ini
 
 input group "=== ZONA ENTRY BOLLINGER BANDS ==="
 input double   InpBBZonePct          = 20.0;       // Jarak minimal dari tepi BB (% lebar band), 0 = nonaktif
@@ -174,7 +183,8 @@ datetime filter_last_bar = 0;
 double   filter_bb_width_pct = 0.0, filter_er = 0.0, filter_adx = 0.0;
 double   filter_bb_upper = 0.0, filter_bb_middle = 0.0, filter_bb_lower = 0.0;
 double   filter_er_net = 0.0, filter_er_total = 0.0;
-double   filter_di_plus = 0.0, filter_di_minus = 0.0;
+double   filter_di_plus = 0.0, filter_di_minus = 0.0, filter_di_spread = 0.0;
+bool     filter_adx_rising = false, filter_adx_falling = false;
 bool     filter_bb_ok = false, filter_er_ok = false, filter_adx_ok = false;
 
 // --- FUNGSI INISIALISASI UTAMA ---
@@ -313,9 +323,11 @@ void OnTick()
    dashboard += "[2] Efficiency Ratio " + tf_filter + " (" + IntegerToString(InpERPeriod) + " candle)\n";
    dashboard += "    Jarak bersih: " + DoubleToString(filter_er_net, _Digits) + " | Total jalan: " + DoubleToString(filter_er_total, _Digits) + "\n";
    dashboard += "    ER    : " + DoubleToString(filter_er, 3) + "  (maks " + DoubleToString(InpMaxER, 2) + ")  " + (filter_er_ok ? "[OK]" : "[X]") + "\n";
-   dashboard += "[3] ADX " + tf_adx + " (" + IntegerToString(InpADXPeriod) + ")\n";
-   dashboard += "    +DI: " + DoubleToString(filter_di_plus, 1) + " | -DI: " + DoubleToString(filter_di_minus, 1) + " | Arah: " + (filter_di_plus > filter_di_minus ? "NAIK" : "TURUN") + "\n";
-   dashboard += "    ADX   : " + DoubleToString(filter_adx, 1) + "  (maks " + DoubleToString(InpMaxADX, 1) + ")  " + (filter_adx_ok ? "[OK]" : "[X]") + "\n";
+   dashboard += "[3] Arah Tren " + tf_adx + " (ADX/DI " + IntegerToString(InpADXPeriod) + ")\n";
+   dashboard += "    +DI: " + DoubleToString(filter_di_plus, 1) + " | -DI: " + DoubleToString(filter_di_minus, 1) + " | Dominan: " + (filter_di_plus > filter_di_minus ? "NAIK" : "TURUN") + "\n";
+   dashboard += "    DI Spread: " + DoubleToString(filter_di_spread, 1) + "  (maks " + DoubleToString(InpMaxDISpread, 1) + ")  " + (filter_di_spread < InpMaxDISpread ? "[OK]" : "[X]") + "\n";
+   dashboard += "    ADX: " + DoubleToString(filter_adx, 1) + " " + (filter_adx_rising ? "NAIK 3x" : (filter_adx_falling ? "TURUN 3x" : "datar")) + "  (rem jika naik & > " + DoubleToString(InpADXRiseFloor, 0) + ")  " + ((filter_adx_rising && filter_adx > InpADXRiseFloor) ? "[X TREN MEMBANGUN]" : "[OK]") + "\n";
+   dashboard += "    Hasil : " + (filter_adx_ok ? "[OK]" : "[X]") + "\n";
    dashboard += ">> STATUS: " + (string)(is_sideways ? "SIDEWAYS - Entry Diizinkan" : "TRENDING - Entry Ditahan") + "\n\n";
 
    dashboard += "--- ZONA ENTRY BB (" + DoubleToString(InpBBZonePct, 0) + "% dari tepi" + (InpDirectionalZone ? ", arah terpisah" : ", hedging") + ") ---\n";
@@ -435,8 +447,10 @@ void UpdateSidewaysFilter()
       total_move += MathAbs(close[i] - close[i + 1]);
 
    // 3. ADX pada timeframe konteks (buffer 0 = ADX, 1 = +DI, 2 = -DI)
+   //    ADX diambil 4 candle untuk mendeteksi arah (naik/turun 3 candle berturut)
    double adx[], di_plus[], di_minus[];
-   if(CopyBuffer(adx_handle, 0, 1, 1, adx)      <= 0 ||
+   ArraySetAsSeries(adx, true);
+   if(CopyBuffer(adx_handle, 0, 1, 4, adx)      < 4  ||
       CopyBuffer(adx_handle, 1, 1, 1, di_plus)  <= 0 ||
       CopyBuffer(adx_handle, 2, 1, 1, di_minus) <= 0) return;
 
@@ -451,10 +465,17 @@ void UpdateSidewaysFilter()
    filter_adx          = adx[0];
    filter_di_plus      = di_plus[0];
    filter_di_minus     = di_minus[0];
+   filter_di_spread    = MathAbs(di_plus[0] - di_minus[0]);
+   filter_adx_rising   = (adx[0] > adx[1] && adx[1] > adx[2] && adx[2] > adx[3]);
+   filter_adx_falling  = (adx[0] < adx[1] && adx[1] < adx[2] && adx[2] < adx[3]);
 
    filter_bb_ok  = (filter_bb_width_pct < InpMaxBBWidthPct);
    filter_er_ok  = (filter_er < InpMaxER);
-   filter_adx_ok = (filter_adx < InpMaxADX);
+
+   // Kondisi utama: DI spread kecil (responsif, smoothing tunggal).
+   // Rem tambahan: ADX sedang membangun tren (naik 3 candle berturut di atas floor) -> tolak.
+   bool adx_building_trend = (filter_adx_rising && filter_adx > InpADXRiseFloor);
+   filter_adx_ok = (filter_di_spread < InpMaxDISpread) && !adx_building_trend;
 
    filter_last_bar = current_bar;
   }
