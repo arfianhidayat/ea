@@ -2,7 +2,7 @@
 //|                                              ZigZag_Analyzer.mq5 |
 //+------------------------------------------------------------------+
 #property copyright "Trader Saham & Forex"
-#property version   "1.40"
+#property version   "1.50"
 
 input int InpDepth     = 12; 
 input int InpDeviation = 5;  
@@ -64,7 +64,7 @@ void UpdateZigZag() {
         ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 2);
     }
 
-    // Membatasi tampilan hanya untuk Titik 1 hingga 5
+    // Menampilkan titik 1 hingga 5 di comment
     string display = "=== 5 TITIK ZIGZAG TERAKHIR ===\n\n";
     int displayLimit = (pointCount < 5) ? pointCount : 5;
     
@@ -75,22 +75,30 @@ void UpdateZigZag() {
     }
     
     if(pointCount >= 5) {
-        // Indeks 1 & 2 adalah Titik 2 & 3. Indeks 3 & 4 adalah Titik 4 & 5.
+        // Indeks 1 & 2 = Titik 2 & 3. Indeks 3 & 4 = Titik 4 & 5.
         double lebar1 = MathAbs(lastPoints[1].price - lastPoints[2].price); 
         double lebar2 = MathAbs(lastPoints[3].price - lastPoints[4].price); 
         
-        display += "\n=== ANALISIS LEBAR AYUNAN ===\n";
-        display += "Lebar Pertama (Titik 2 & 3) : " + DoubleToString(lebar1, _Digits) + "\n";
-        display += "Lebar Kedua   (Titik 4 & 5) : " + DoubleToString(lebar2, _Digits) + "\n";
-        
         double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+        
+        // Lebar harga sekarang terhadap Titik ke-2 (indeks 1)
+        double lebarHargaSaatIni = MathAbs(currentPrice - lastPoints[1].price);
         
         double upperBoundary = MathMax(lastPoints[1].price, lastPoints[2].price);
         double lowerBoundary = MathMin(lastPoints[1].price, lastPoints[2].price);
         
         bool isPriceBetween = (currentPrice <= upperBoundary && currentPrice >= lowerBoundary);
         
-        if(lebar1 < lebar2 && isPriceBetween) {
+        // Kondisi tambahan: lebar harga saat ini vs titik 2 < lebar pertama
+        bool isLebarCurrentValid = (lebarHargaSaatIni < lebar1);
+        
+        display += "\n=== ANALISIS LEBAR AYUNAN ===\n";
+        display += "Lebar Pertama (Titik 2 & 3)     : " + DoubleToString(lebar1, _Digits) + "\n";
+        display += "Lebar Kedua   (Titik 4 & 5)     : " + DoubleToString(lebar2, _Digits) + "\n";
+        display += "Lebar Now vs Titik 2            : " + DoubleToString(lebarHargaSaatIni, _Digits) + "\n";
+        
+        // Evaluasi gabungan kondisi filter Sideway
+        if(lebar1 < lebar2 && isPriceBetween && isLebarCurrentValid) {
             display += "\n>> STATUS PASAR: SIDEWAY <<\n";
         } else {
             display += "\n>> STATUS PASAR: TRENDING <<\n";
