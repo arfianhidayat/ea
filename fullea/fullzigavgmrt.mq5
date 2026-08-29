@@ -2,9 +2,8 @@
 //|                                              ZigZag_Analyzer.mq5 |
 //+------------------------------------------------------------------+
 #property copyright "Trader Saham & Forex"
-#property version   "1.30"
+#property version   "1.40"
 
-// Parameter Input ZigZag Standar
 input int InpDepth     = 12; 
 input int InpDeviation = 5;  
 input int InpBackstep  = 3;  
@@ -65,26 +64,36 @@ void UpdateZigZag() {
         ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 2);
     }
 
-    string display = "=== 10 TITIK ZIGZAG TERAKHIR ===\n\n";
-    for(int k = 0; k < pointCount; k++) {
+    // Membatasi tampilan hanya untuk Titik 1 hingga 5
+    string display = "=== 5 TITIK ZIGZAG TERAKHIR ===\n\n";
+    int displayLimit = (pointCount < 5) ? pointCount : 5;
+    
+    for(int k = 0; k < displayLimit; k++) {
         display += "Titik " + IntegerToString(k+1) + " :  " + 
                    DoubleToString(lastPoints[k].price, _Digits) + 
                    "   [" + TimeToString(lastPoints[k].time, TIME_DATE|TIME_MINUTES) + "]\n";
     }
     
-    // Blok Kalkulasi Lebar & Deteksi Sideway
     if(pointCount >= 5) {
-        // Indeks array dimulai dari 0 (Titik 1 = indeks 0, Titik 2 = indeks 1, dst)
-        double lebar1 = MathAbs(lastPoints[1].price - lastPoints[2].price); // Titik ke-2 dan ke-3
-        double lebar2 = MathAbs(lastPoints[3].price - lastPoints[4].price); // Titik ke-4 dan ke-5
+        // Indeks 1 & 2 adalah Titik 2 & 3. Indeks 3 & 4 adalah Titik 4 & 5.
+        double lebar1 = MathAbs(lastPoints[1].price - lastPoints[2].price); 
+        double lebar2 = MathAbs(lastPoints[3].price - lastPoints[4].price); 
         
         display += "\n=== ANALISIS LEBAR AYUNAN ===\n";
         display += "Lebar Pertama (Titik 2 & 3) : " + DoubleToString(lebar1, _Digits) + "\n";
         display += "Lebar Kedua   (Titik 4 & 5) : " + DoubleToString(lebar2, _Digits) + "\n";
         
-        // Logika Sideway: Lebar ayunan terbaru lebih kecil dari ayunan sebelumnya
-        if(lebar1 < lebar2) {
+        double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+        
+        double upperBoundary = MathMax(lastPoints[1].price, lastPoints[2].price);
+        double lowerBoundary = MathMin(lastPoints[1].price, lastPoints[2].price);
+        
+        bool isPriceBetween = (currentPrice <= upperBoundary && currentPrice >= lowerBoundary);
+        
+        if(lebar1 < lebar2 && isPriceBetween) {
             display += "\n>> STATUS PASAR: SIDEWAY <<\n";
+        } else {
+            display += "\n>> STATUS PASAR: TRENDING <<\n";
         }
     }
     
