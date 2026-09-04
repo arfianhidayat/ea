@@ -116,17 +116,17 @@
 input group "=== SETTING LOT & GRID ==="
 input double   InpInitialLot         = 0.01;
 input double   InpGridDistance       = 2.0;      // Jarak Averaging
-input int      InpMaxPositions       = 99;       // Maksimal Posisi Averaging
+input int      InpMaxPositions       = 22;      // Maksimal Posisi Averaging
 input double   InpTakeProfitSingle   = 1.0;
-input double   InpTakeProfitBEP1     = 0.7;
+input double   InpTakeProfitBEP1     = 1.0;
 input double   InpLotMultiplier      = 1.2;
 input ulong    InpMagicNumber        = 88888;
 
 input group "=== FILTER SIDEWAYS (dihitung per candle baru) ==="
 input ENUM_TIMEFRAMES InpFilterTimeFrame = PERIOD_M15; // Timeframe BB & Efficiency Ratio
-input int      InpBBPeriod           = 20;         // Periode BB
+input int      InpBBPeriod           = 10;         // Periode BB
 input double   InpBBDeviation        = 2.0;        // Deviasi BB
-input double   InpMaxBBWidthPct      = 0.8;        // Maks Lebar BB (% dari harga tengah)
+input double   InpMaxBBWidthPct      = 1.0;        // Maks Lebar BB (% dari harga tengah)
 input int      InpERPeriod           = 20;         // Periode Efficiency Ratio
 input double   InpMaxER              = 0.3;        // Maks Efficiency Ratio (0=sideways, 1=trending)
 input ENUM_TIMEFRAMES InpADXTimeFrame = PERIOD_M30; // Timeframe ADX/DI (konteks tren besar)
@@ -139,10 +139,10 @@ input double   InpBBZonePct          = 20.0;       // Jarak minimal dari tepi BB
 input bool     InpDirectionalZone    = false;      // true: Sell hanya di atas middle, Buy hanya di bawah middle
 
 input group "=== AKTIVASI SESI TRADING ==="
-input bool     InpUseSessionFilter   = true;     // true: entry hanya di sesi di bawah | false: entry 24 jam
+input bool     InpUseSessionFilter   = false;     // true: entry hanya di sesi di bawah | false: entry 24 jam
 input bool     InpUseAsia            = true;
-input bool     InpUseEropa           = false;     
-input bool     InpUseUS              = false;     
+input bool     InpUseEropa           = true;     
+input bool     InpUseUS              = true;     
 input string   InpAsiaStart          = "07:00";  
 input string   InpAsiaEnd            = "14:00";  
 input string   InpEropaStart         = "15:30";  
