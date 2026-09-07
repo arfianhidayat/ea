@@ -18,9 +18,35 @@ input double   InpGridDistance       = 3.0;      // Jarak Averaging
 input double   InpTakeProfitSingle   = 1.5;      // TP jika HANYA 1 Posisi
 input double   InpTakeProfitBEP1     = 0.7;      // TP BEP 1 (Averaging Awal)
 input int      InpAktifTPBEP2Posisi  = 5;        // Aktif TP BEP 2 pada Posisi ke-
-input double   InpTakeProfitBEP2     = 0.3;      // TP BEP 2 (Averaging Lanjut)
+input double   InpTakeProfitBEP2     = 0.4;      // TP BEP 2 (Averaging Lanjut)
 input double   InpLotMultiplier      = 1.3;      // Multiplier Martingale
 input ulong    InpMagicNumber        = 88888;    // Magic Number EA
+
+//--- 3. Inputs Filter Sesi Trading (Semua jam dalam WIB / GMT+7)
+input group "=== AKTIVASI SESI TRADING (JAM WIB) ==="
+input bool     InpUseSessionFilter   = false;     // true: entry hanya di sesi di bawah | false: entry 24 jam
+input bool     InpAutoDetectGMT      = true;      // true: offset broker dideteksi otomatis (live) | false: pakai input di bawah
+input int      InpBrokerGMTOffset    = 3;         // Offset GMT server broker (dipakai di Strategy Tester / jika auto OFF)
+input bool     InpUseAsia            = true;
+input bool     InpUseEropa           = true;
+input bool     InpUseUS              = true;
+input string   InpAsiaStart          = "09:30";
+input string   InpAsiaEnd            = "12:30";
+input string   InpEropaStart         = "15:30";
+input string   InpEropaEnd           = "17:30";
+input string   InpUSStart            = "22:30";
+input string   InpUSEnd              = "01:30";
+
+//--- 4. Inputs Filter News (Kalender Ekonomi MT5 + Blackout Manual WIB)
+input group "=== FILTER NEWS (Kalender Ekonomi MT5) ==="
+input bool     InpUseNewsFilter      = true;     // Aktifkan filter berita
+input string   InpNewsCurrencies     = "USD";    // Mata uang yang dipantau, pisahkan koma (mis. "USD,EUR")
+input bool     InpNewsHighOnly       = true;     // true: hanya dampak tinggi | false: tinggi + sedang
+input int      InpNewsMinutesBefore  = 30;       // Tahan entry X menit sebelum berita
+input int      InpNewsMinutesAfter   = 30;       // Tahan entry X menit sesudah berita
+input string   InpBlackout1          = "20:15-21:00"; // Jendela larangan manual WIB (cadangan, aktif juga di tester)
+input string   InpBlackout2          = "04:00-05:30"; // Jendela larangan manual WIB
+input string   InpBlackout3          = "";       // Jendela larangan manual WIB (kosong = tidak dipakai)
 
 //--- Global Variables (Memory)
 int atrHandle;
@@ -269,16 +295,26 @@ void OnTick()
    bool buy_signal = (src > ts) && (src_prev <= ts_prev); 
    bool sell_signal = (src < ts) && (src_prev >= ts_prev); 
 
+   // --- FILTER SESI TRADING (hanya untuk entry awal UT Bot) ---
+   string session_name = "";
+   bool session_ok = IsTradingSession(session_name);
+
+   // --- FILTER NEWS (hanya untuk entry awal UT Bot) ---
+   string news_reason = "";
+   bool news_blocked = IsNewsBlocked(news_reason);
+
+   bool entry_allowed = session_ok && !news_blocked;
+
    // --- FILTER ANTI-DOUBLE ENTRY ---
-   
-   // Hanya entry BUY jika ada sinyal DAN belum ada posisi BUY
-   if(buy_signal && buy_count == 0) 
+
+   // Hanya entry BUY jika ada sinyal, filter lolos, DAN belum ada posisi BUY
+   if(buy_signal && entry_allowed && buy_count == 0)
      {
       trade.Buy(InpLotSize, _Symbol, 0, 0, 0, "UT Bot Buy Pertama");
      }
-   
-   // Hanya entry SELL jika ada sinyal DAN belum ada posisi SELL
-   if(sell_signal && sell_count == 0) 
+
+   // Hanya entry SELL jika ada sinyal, filter lolos, DAN belum ada posisi SELL
+   if(sell_signal && entry_allowed && sell_count == 0)
      {
       trade.Sell(InpLotSize, _Symbol, 0, 0, 0, "UT Bot Sell Pertama");
      }
@@ -288,7 +324,15 @@ void OnTick()
      {
       dashboard += "\n--- STATUS UT BOT ---\n";
       dashboard += "Batas Trailing Stop : " + DoubleToString(ts, _Digits) + "\n";
-      dashboard += "Menunggu Sinyal Valid Berikutnya...\n";
+      dashboard += "Jam WIB : " + TimeToString(GetWIBTime(), TIME_MINUTES) + "\n";
+      dashboard += "Sesi Trading : " + session_name + "\n";
+      dashboard += "Filter News : " + (InpUseNewsFilter ? (news_blocked ? "BLOKIR (" + news_reason + ")" : "Aman") : "OFF") + "\n";
+      if(entry_allowed)
+         dashboard += "Menunggu Sinyal Valid Berikutnya...\n";
+      else if(!session_ok)
+         dashboard += "Di luar sesi, entry awal ditunda.\n";
+      else
+         dashboard += "Ada berita, entry awal ditunda.\n";
      }
      
    Comment(dashboard);
@@ -316,6 +360,233 @@ void CloseAll(long pos_type)
            }
         }
      }
+  }
+
+//+------------------------------------------------------------------+
+//| Konversi string "HH:MM" ke menit sejak tengah malam (-1 jika salah)|
+//+------------------------------------------------------------------+
+int TimeStringToMinutes(string hhmm)
+  {
+   string parts[];
+   if(StringSplit(hhmm, ':', parts) != 2)
+      return -1;
+
+   int hh = (int)StringToInteger(parts[0]);
+   int mm = (int)StringToInteger(parts[1]);
+
+   if(hh < 0 || hh > 23 || mm < 0 || mm > 59)
+      return -1;
+
+   return hh * 60 + mm;
+  }
+
+//+------------------------------------------------------------------+
+//| Cek apakah menit saat ini berada dalam rentang start-end.        |
+//| Mendukung sesi lewat tengah malam (misal 22:30 - 01:30).         |
+//+------------------------------------------------------------------+
+bool InTimeRange(int now_min, string start_str, string end_str)
+  {
+   int start = TimeStringToMinutes(start_str);
+   int end   = TimeStringToMinutes(end_str);
+
+   if(start < 0 || end < 0)
+     {
+      Print("Format jam sesi tidak valid: ", start_str, " - ", end_str, " (gunakan HH:MM)");
+      return false;
+     }
+
+   if(start == end)
+      return true; // rentang penuh 24 jam
+
+   if(start < end)
+      return (now_min >= start && now_min < end);
+
+   // Lewat tengah malam
+   return (now_min >= start || now_min < end);
+  }
+
+//+------------------------------------------------------------------+
+//| Mengambil waktu saat ini dalam WIB (GMT+7).                      |
+//| Live   : offset server dihitung dari TimeCurrent() - TimeGMT().  |
+//| Tester : TimeGMT() tidak valid, jadi pakai InpBrokerGMTOffset.   |
+//+------------------------------------------------------------------+
+datetime GetWIBTime()
+  {
+   const int WIB_OFFSET_SEC = 7 * 3600;
+   datetime server_time = TimeCurrent();
+   int server_offset_sec;
+
+   bool in_tester = (MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_OPTIMIZATION));
+
+   if(InpAutoDetectGMT && !in_tester)
+      server_offset_sec = (int)(server_time - TimeGMT());
+   else
+      server_offset_sec = InpBrokerGMTOffset * 3600;
+
+   datetime gmt_time = server_time - server_offset_sec;
+   return gmt_time + WIB_OFFSET_SEC;
+  }
+
+//+------------------------------------------------------------------+
+//| Cek sesi trading aktif berdasarkan jam WIB.                      |
+//| Mengisi active_name dengan nama sesi yang sedang berjalan.       |
+//+------------------------------------------------------------------+
+bool IsTradingSession(string &active_name)
+  {
+   if(!InpUseSessionFilter)
+     {
+      active_name = "24 Jam (Filter OFF)";
+      return true;
+     }
+
+   MqlDateTime dt;
+   TimeToStruct(GetWIBTime(), dt);
+   int now_min = dt.hour * 60 + dt.min;
+
+   active_name = "";
+
+   if(InpUseAsia && InTimeRange(now_min, InpAsiaStart, InpAsiaEnd))
+      active_name += "Asia ";
+   if(InpUseEropa && InTimeRange(now_min, InpEropaStart, InpEropaEnd))
+      active_name += "Eropa ";
+   if(InpUseUS && InTimeRange(now_min, InpUSStart, InpUSEnd))
+      active_name += "US ";
+
+   if(active_name == "")
+     {
+      active_name = "Tidak Ada (Di Luar Sesi)";
+      return false;
+     }
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Cek jendela blackout manual "HH:MM-HH:MM" (jam WIB).             |
+//+------------------------------------------------------------------+
+bool InBlackoutWindow(int now_min_wib, string window, string &label)
+  {
+   string w = window;
+   StringTrimLeft(w);
+   StringTrimRight(w);
+   if(w == "")
+      return false;
+
+   string parts[];
+   if(StringSplit(w, '-', parts) != 2)
+     {
+      Print("Format blackout tidak valid: ", window, " (gunakan HH:MM-HH:MM)");
+      return false;
+     }
+
+   StringTrimLeft(parts[0]);  StringTrimRight(parts[0]);
+   StringTrimLeft(parts[1]);  StringTrimRight(parts[1]);
+
+   if(InTimeRange(now_min_wib, parts[0], parts[1]))
+     {
+      label = "Blackout " + w + " WIB";
+      return true;
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Cek Kalender Ekonomi MT5 untuk berita di sekitar waktu sekarang. |
+//| Waktu event kalender = waktu server, sama dengan TimeCurrent().  |
+//| Tidak tersedia di Strategy Tester (langsung return false).       |
+//+------------------------------------------------------------------+
+bool IsCalendarNewsNear(string &label)
+  {
+   if(MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_OPTIMIZATION))
+      return false;
+
+   // Cache hasil 60 detik agar tidak query kalender tiap tick
+   static datetime last_check   = 0;
+   static bool     last_result  = false;
+   static string   last_label   = "";
+
+   datetime now = TimeCurrent();
+   if(now - last_check < 60 && last_check != 0)
+     {
+      label = last_label;
+      return last_result;
+     }
+
+   last_check  = now;
+   last_result = false;
+   last_label  = "";
+
+   datetime from = now - (datetime)(InpNewsMinutesAfter  * 60);
+   datetime to   = now + (datetime)(InpNewsMinutesBefore * 60);
+
+   string currencies[];
+   int n = StringSplit(InpNewsCurrencies, ',', currencies);
+
+   for(int c = 0; c < n && !last_result; c++)
+     {
+      string cur = currencies[c];
+      StringTrimLeft(cur);
+      StringTrimRight(cur);
+      if(cur == "")
+         continue;
+
+      MqlCalendarValue values[];
+      if(!CalendarValueHistory(values, from, to, NULL, cur))
+        {
+         Print("CalendarValueHistory gagal untuk ", cur, ", error ", GetLastError());
+         continue;
+        }
+
+      for(int i = 0; i < ArraySize(values); i++)
+        {
+         MqlCalendarEvent ev;
+         if(!CalendarEventById(values[i].event_id, ev))
+            continue;
+
+         bool impact_ok = (ev.importance == CALENDAR_IMPORTANCE_HIGH) ||
+                          (!InpNewsHighOnly && ev.importance == CALENDAR_IMPORTANCE_MODERATE);
+         if(!impact_ok)
+            continue;
+
+         datetime ev_time = values[i].time;
+         if(now >= ev_time - InpNewsMinutesBefore * 60 && now <= ev_time + InpNewsMinutesAfter * 60)
+           {
+            datetime ev_wib = ev_time - (now - GetWIBTime());
+            last_label  = cur + " " + ev.name + " @ " + TimeToString(ev_wib, TIME_MINUTES) + " WIB";
+            last_result = true;
+            break;
+           }
+        }
+     }
+
+   label = last_label;
+   return last_result;
+  }
+
+//+------------------------------------------------------------------+
+//| Gabungan filter news: kalender MT5 + blackout manual WIB.        |
+//| Return true jika entry harus DITAHAN.                            |
+//+------------------------------------------------------------------+
+bool IsNewsBlocked(string &reason)
+  {
+   reason = "";
+   if(!InpUseNewsFilter)
+      return false;
+
+   // 1. Blackout manual (berjalan juga di Strategy Tester)
+   MqlDateTime dt;
+   TimeToStruct(GetWIBTime(), dt);
+   int now_min_wib = dt.hour * 60 + dt.min;
+
+   if(InBlackoutWindow(now_min_wib, InpBlackout1, reason)) return true;
+   if(InBlackoutWindow(now_min_wib, InpBlackout2, reason)) return true;
+   if(InBlackoutWindow(now_min_wib, InpBlackout3, reason)) return true;
+
+   // 2. Kalender ekonomi MT5 (hanya live)
+   if(IsCalendarNewsNear(reason))
+      return true;
+
+   return false;
   }
 
 double CalculateLot(double calculated_lot)
