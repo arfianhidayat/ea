@@ -14,17 +14,17 @@ input int      InpATRPeriod          = 10;       // ATR Period
 input double   InpLotSize            = 0.01;     // Ukuran Lot Awal
 
 //--- 2. Inputs Martingale & Grid (Sistem Close/Averaging)
-input double   InpGridDistance       = 3.0;      // Jarak Averaging
-input double   InpTakeProfitSingle   = 1.5;      // TP jika HANYA 1 Posisi
-input double   InpTakeProfitBEP1     = 0.7;      // TP BEP 1 (Averaging Awal)
+input double   InpGridDistance       = 2.0;      // Jarak Averaging
+input double   InpTakeProfitSingle   = 1.0;      // TP jika HANYA 1 Posisi
+input double   InpTakeProfitBEP1     = 1.0;      // TP BEP 1 (Averaging Awal)
 input int      InpAktifTPBEP2Posisi  = 5;        // Aktif TP BEP 2 pada Posisi ke-
-input double   InpTakeProfitBEP2     = 0.4;      // TP BEP 2 (Averaging Lanjut)
-input double   InpLotMultiplier      = 1.3;      // Multiplier Martingale
+input double   InpTakeProfitBEP2     = 1.0;      // TP BEP 2 (Averaging Lanjut)
+input double   InpLotMultiplier      = 1.2;      // Multiplier Martingale
 input ulong    InpMagicNumber        = 88888;    // Magic Number EA
 
 //--- 3. Inputs Filter Sesi Trading (Semua jam dalam WIB / GMT+7)
 input group "=== AKTIVASI SESI TRADING (JAM WIB) ==="
-input bool     InpUseSessionFilter   = false;     // true: entry hanya di sesi di bawah | false: entry 24 jam
+input bool     InpUseSessionFilter   = true;     // true: entry hanya di sesi di bawah | false: entry 24 jam
 input bool     InpAutoDetectGMT      = true;      // true: offset broker dideteksi otomatis (live) | false: pakai input di bawah
 input int      InpBrokerGMTOffset    = 3;         // Offset GMT server broker (dipakai di Strategy Tester / jika auto OFF)
 input bool     InpUseAsia            = true;
