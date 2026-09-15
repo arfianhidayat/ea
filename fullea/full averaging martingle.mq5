@@ -129,26 +129,26 @@ input double   InpBBDeviation        = 2.0;        // Deviasi BB
 input double   InpMaxBBWidthPct      = 1.0;        // Maks Lebar BB (% dari harga tengah)
 input int      InpERPeriod           = 20;         // Periode Efficiency Ratio
 input double   InpMaxER              = 0.3;        // Maks Efficiency Ratio (0=sideways, 1=trending)
-input ENUM_TIMEFRAMES InpADXTimeFrame = PERIOD_M30; // Timeframe ADX/DI (konteks tren besar)
+input ENUM_TIMEFRAMES InpADXTimeFrame = PERIOD_M15; // Timeframe ADX/DI (konteks tren besar)
 input int      InpADXPeriod          = 20;         // Periode ADX/DI (20 di M30 ~ cakupan 14 di H1)
-input double   InpMaxDISpread        = 12.0;       // Maks |+DI - -DI| (kecil = tidak ada arah dominan)
+input double   InpMaxDISpread        = 14.0;       // Maks |+DI - -DI| (kecil = tidak ada arah dominan)
 input double   InpADXRiseFloor       = 15.0;       // Rem: tolak jika ADX naik 3 candle berturut DAN ADX > nilai ini
 
 input group "=== ZONA ENTRY BOLLINGER BANDS ==="
-input double   InpBBZonePct          = 20.0;       // Jarak minimal dari tepi BB (% lebar band), 0 = nonaktif
+input double   InpBBZonePct          = 10.0;       // Jarak minimal dari tepi BB (% lebar band), 0 = nonaktif
 input bool     InpDirectionalZone    = false;      // true: Sell hanya di atas middle, Buy hanya di bawah middle
 
 input group "=== AKTIVASI SESI TRADING ==="
-input bool     InpUseSessionFilter   = false;     // true: entry hanya di sesi di bawah | false: entry 24 jam
+input bool     InpUseSessionFilter   = true;     // true: entry hanya di sesi di bawah | false: entry 24 jam
 input bool     InpUseAsia            = true;
 input bool     InpUseEropa           = true;     
-input bool     InpUseUS              = true;     
-input string   InpAsiaStart          = "07:00";  
+input bool     InpUseUS              = false;     
+input string   InpAsiaStart          = "09:00";  
 input string   InpAsiaEnd            = "14:00";  
 input string   InpEropaStart         = "15:30";  
 input string   InpEropaEnd           = "17:30";  
-input string   InpUSStart            = "22:30";
-input string   InpUSEnd              = "01:30";
+input string   InpUSStart            = "23:30";
+input string   InpUSEnd              = "01:00";
 
 input group "=== FILTER SPREAD ==="
 input double   InpMaxSpread          = 0.4;      // Maks spread (satuan harga) untuk entry awal, 0 = nonaktif
@@ -158,9 +158,9 @@ input bool     InpUseNewsFilter      = true;     // Aktifkan filter berita
 input string   InpNewsCurrencies     = "USD";    // Mata uang yang dipantau, pisahkan koma (mis. "USD,EUR")
 input bool     InpNewsHighOnly       = true;     // true: hanya dampak tinggi | false: tinggi + sedang
 input int      InpNewsMinutesBefore  = 30;       // Tahan entry X menit sebelum berita
-input int      InpNewsMinutesAfter   = 30;       // Tahan entry X menit sesudah berita
-input string   InpBlackout1          = "20:15-21:00"; // Jendela larangan manual WIB (cadangan, aktif juga di tester)
-input string   InpBlackout2          = "04:00-05:30"; // Jendela larangan manual WIB
+input int      InpNewsMinutesAfter   = 60;       // Tahan entry X menit sesudah berita
+input string   InpBlackout1          = "18:15-21:00"; // Jendela larangan manual WIB (cadangan, aktif juga di tester)
+input string   InpBlackout2          = "04:00-09:00"; // Jendela larangan manual WIB
 input string   InpBlackout3          = "";       // Jendela larangan manual WIB (kosong = tidak dipakai)
 
 CTrade trade;
