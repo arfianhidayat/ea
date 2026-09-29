@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                  Auto_Martingale_Grid_BB_Mod.mq5 |
-//|              Versi 4.2 (Sideways + BB Zone + Spread/News Filter) |
+//|              Versi 4.3 (Sideways + BB Zone + Spread/News Filter) |
 //+------------------------------------------------------------------+
 //| ALUR PROGRAM (dijalankan setiap tick):                           |
 //|                                                                  |
@@ -20,8 +20,8 @@
 //|       jumlah |close[i] - close[i-1]| selama N candle             |
 //|       di InpFilterTimeFrame, harus < InpMaxER                    |
 //|       -> menolak harga yang bergerak lurus (tren pelan pun kena) |
-//|    c. Arah tren di InpADXTimeFrame (default M30, periode 20 agar |
-//|       cakupan waktu setara H1/14 tapi update tiap 30 menit):     |
+//|    c. Arah tren di InpADXTimeFrame (default M15, periode 20      |
+//|       -> cakupan ~5 jam, diperbarui tiap 15 menit):              |
 //|       - |+DI - -DI| < InpMaxDISpread  (kondisi utama)            |
 //|         DI hanya di-smoothing sekali -> jauh lebih responsif     |
 //|         daripada ADX; spread kecil = tidak ada arah dominan      |
@@ -41,6 +41,8 @@
 //|      - spread (ask - bid) <= InpMaxSpread (0 = tidak dicek)      |
 //|      - tidak dalam jendela berita (lihat FILTER NEWS di bawah)   |
 //|      - bid di dalam zona entry BB (lihat di bawah)               |
+//|      - guard intra-candle OK (lihat di bawah)                    |
+//|      - tidak sedang menutup basket Sell (lihat langkah 5)        |
 //|    Buka Buy dgn InpInitialLot jika SEMUA terpenuhi:              |
 //|      - belum ada posisi Buy                                      |
 //|      - dalam sesi trading                                        |
@@ -48,6 +50,8 @@
 //|      - spread <= InpMaxSpread                                    |
 //|      - tidak dalam jendela berita                                |
 //|      - ask di dalam zona entry BB (lihat di bawah)               |
+//|      - guard intra-candle OK (lihat di bawah)                    |
+//|      - tidak sedang menutup basket Buy (lihat langkah 5)         |
 //|    Buy dan Sell BISA terbuka bersamaan (hedging dua arah).       |
 //|                                                                  |
 //|    FILTER NEWS (InpUseNewsFilter), dua lapis, cukup satu kena:   |
@@ -58,7 +62,8 @@
 //|       ulang tiap 60 detik. TIDAK tersedia di strategy tester.    |
 //|    b. Blackout manual InpBlackout1..3 ("HH:MM-HH:MM", WIB):      |
 //|       jendela tetap yang selalu berlaku, termasuk di tester.     |
-//|       Default: 20:15-21:00 (data US) dan 04:00-05:30 (rollover). |
+//|       Default: 18:15-22:15 (data & sesi US) dan 03:00-09:00      |
+//|       (rollover/swap & pasar tipis menjelang sesi Asia).         |
 //|                                                                  |
 //|    ZONA ENTRY BB: harga harus berjarak minimal InpBBZonePct      |
 //|    (% dari lebar band) dari upper DAN lower band, yaitu:         |
@@ -71,6 +76,14 @@
 //|    InpDirectionalZone = true (opsional, default false):          |
 //|      Sell hanya jika bid >= middle, Buy hanya jika ask <= middle |
 //|      -> menghilangkan hedging, entry searah mean-reversion.      |
+//|                                                                  |
+//|    GUARD INTRA-CANDLE (InpUseIntraGuard, dicek TIAP TICK):       |
+//|    Filter sideways hanya menilai candle tertutup, jadi breakout  |
+//|    di tengah candle berjalan tidak terlihat s.d. 15 menit.       |
+//|    Guard ini menutup celah itu: jika range (high-low) candle     |
+//|    filter yang sedang berjalan > InpMaxIntraRangePct % dari      |
+//|    lebar BB cache, entry awal ditahan sampai candle selesai      |
+//|    dan filter menilai ulang. Averaging tidak terpengaruh.        |
 //|                                                                  |
 //| 4. AVERAGING / MARTINGALE (per arah, tiap tick, tanpa filter     |
 //|    sideways dan tanpa filter sesi)                               |
@@ -85,16 +98,25 @@
 //|                                                                  |
 //| 5. TAKE PROFIT (per arah, tutup semua posisi arah tersebut)      |
 //|    - 1 posisi   : TP = BEP +/- InpTakeProfitSingle               |
-//|    - >= 2 posisi: TP = BEP +/- InpTakeProfitBEP1                 |
+//|    - >= 2 posisi: TP = BEP +/- InpTakeProfitBEP                  |
 //|    Sell ditutup saat ask <= TP, Buy ditutup saat bid >= TP.      |
+//|    Penutupan bersifat PERSISTEN + ASYNC: begitu TP tersentuh,    |
+//|    semua permintaan close dikirim sekaligus (SetAsyncMode) agar  |
+//|    basket besar tertutup cepat dalam 1 tick. Posisi yang gagal   |
+//|    tertutup di server terdeteksi dari scan posisi tick berikut   |
+//|    dan dikirim ulang, sampai arah itu benar-benar kosong, walau  |
+//|    harga sudah bergerak. Selama proses menutup, entry dan        |
+//|    averaging arah tersebut ditahan.                              |
 //|    Setelah tertutup, tick berikutnya kembali ke langkah 3.       |
 //|                                                                  |
 //| 6. DASHBOARD                                                     |
 //|    Comment() di chart: status sesi, bid/ask/spread + status,     |
 //|    status news (berita aktif / berikutnya / blackout), nilai &   |
-//|    status 3 filter sideways, batas zona entry BB & posisi harga  |
-//|    di dalamnya, dan untuk tiap arah: jumlah posisi, total lot,   |
-//|    floating, harga averaging berikutnya, BEP, dan target TP.     |
+//|    status 3 filter sideways, status guard intra-candle, batas    |
+//|    zona entry BB & posisi harga di dalamnya, dan untuk tiap      |
+//|    arah: jumlah posisi (+ tanda MENUTUP SEMUA saat penutupan     |
+//|    basket berlangsung), total lot, floating, harga averaging     |
+//|    berikutnya, BEP, dan target TP.                               |
 //|                                                                  |
 //| CATATAN:                                                         |
 //| - Tidak ada Stop Loss. Risiko dibatasi hanya oleh InpMaxPositions|
@@ -104,21 +126,24 @@
 //|   sesi dan blackout manual memakai WIB (GMT+7).                  |
 //| - EA tidak bergantung pada timeframe chart; semua indikator      |
 //|   memakai timeframe eksplisit dari input.                        |
-//| - Semua order dicek hasilnya; jika gagal dicetak ke log Expert.  |
+//| - Order entry & averaging dicek hasil eksekusinya. Order close   |
+//|   dikirim ASYNC: yang dicek adalah keberhasilan kirim, eksekusi  |
+//|   diverifikasi lewat scan posisi tick berikutnya (langkah 5).    |
+//|   Semua kegagalan dicetak ke log Expert.                         |
 //+------------------------------------------------------------------+
 #property copyright "Strategi Trading"
 #property link      "https://www.mql5.com"
-#property version   "4.20"
+#property version   "4.30"
 
 #include <Trade\Trade.mqh>
 
 //--- Input Parameters --- 
 input group "=== SETTING LOT & GRID ==="
 input double   InpInitialLot         = 0.01;
-input double   InpGridDistance       = 2.0;      // Jarak Averaging
-input int      InpMaxPositions       = 22;      // Maksimal Posisi Averaging
+input double   InpGridDistance       = 2.0;     // Jarak Averaging
+input int      InpMaxPositions       = 99;      // Maksimal Posisi Averaging
 input double   InpTakeProfitSingle   = 1.0;
-input double   InpTakeProfitBEP1     = 1.0;
+input double   InpTakeProfitBEP      = 1.0;     // TP BEP
 input double   InpLotMultiplier      = 1.2;
 input ulong    InpMagicNumber        = 88888;
 
@@ -128,20 +153,24 @@ input int      InpBBPeriod           = 10;         // Periode BB
 input double   InpBBDeviation        = 2.0;        // Deviasi BB
 input double   InpMaxBBWidthPct      = 1.0;        // Maks Lebar BB (% dari harga tengah)
 input int      InpERPeriod           = 20;         // Periode Efficiency Ratio
-input double   InpMaxER              = 0.3;        // Maks Efficiency Ratio (0=sideways, 1=trending)
+input double   InpMaxER              = 0.4;        // Maks Efficiency Ratio (0=sideways, 1=trending)
 input ENUM_TIMEFRAMES InpADXTimeFrame = PERIOD_M15; // Timeframe ADX/DI (konteks tren besar)
-input int      InpADXPeriod          = 20;         // Periode ADX/DI (20 di M30 ~ cakupan 14 di H1)
+input int      InpADXPeriod          = 20;         // Periode ADX/DI (20 di M15 ~ cakupan 5 jam)
 input double   InpMaxDISpread        = 14.0;       // Maks |+DI - -DI| (kecil = tidak ada arah dominan)
 input double   InpADXRiseFloor       = 15.0;       // Rem: tolak jika ADX naik 3 candle berturut DAN ADX > nilai ini
+
+input group "=== GUARD INTRA-CANDLE (dicek tiap tick) ==="
+input bool     InpUseIntraGuard      = true;       // Tahan entry jika candle filter yang sedang berjalan bergerak besar
+input double   InpMaxIntraRangePct   = 60.0;       // Maks range candle berjalan (% dari lebar BB cache)
 
 input group "=== ZONA ENTRY BOLLINGER BANDS ==="
 input double   InpBBZonePct          = 10.0;       // Jarak minimal dari tepi BB (% lebar band), 0 = nonaktif
 input bool     InpDirectionalZone    = false;      // true: Sell hanya di atas middle, Buy hanya di bawah middle
 
 input group "=== AKTIVASI SESI TRADING ==="
-input bool     InpUseSessionFilter   = true;     // true: entry hanya di sesi di bawah | false: entry 24 jam
-input bool     InpUseAsia            = true;
-input bool     InpUseEropa           = true;     
+input bool     InpUseSessionFilter   = false;     // true: entry hanya di sesi di bawah | false: entry 24 jam
+input bool     InpUseAsia            = false;
+input bool     InpUseEropa           = false;     
 input bool     InpUseUS              = false;     
 input string   InpAsiaStart          = "09:00";  
 input string   InpAsiaEnd            = "14:00";  
@@ -159,8 +188,8 @@ input string   InpNewsCurrencies     = "USD";    // Mata uang yang dipantau, pis
 input bool     InpNewsHighOnly       = true;     // true: hanya dampak tinggi | false: tinggi + sedang
 input int      InpNewsMinutesBefore  = 30;       // Tahan entry X menit sebelum berita
 input int      InpNewsMinutesAfter   = 60;       // Tahan entry X menit sesudah berita
-input string   InpBlackout1          = "18:15-21:00"; // Jendela larangan manual WIB (cadangan, aktif juga di tester)
-input string   InpBlackout2          = "04:00-09:00"; // Jendela larangan manual WIB
+input string   InpBlackout1          = "18:15-22:15"; // Jendela larangan manual WIB (cadangan, aktif juga di tester)
+input string   InpBlackout2          = "03:00-09:00"; // Jendela larangan manual WIB
 input string   InpBlackout3          = "";       // Jendela larangan manual WIB (kosong = tidak dipakai)
 
 CTrade trade;
@@ -186,6 +215,11 @@ double   filter_er_net = 0.0, filter_er_total = 0.0;
 double   filter_di_plus = 0.0, filter_di_minus = 0.0, filter_di_spread = 0.0;
 bool     filter_adx_rising = false, filter_adx_falling = false;
 bool     filter_bb_ok = false, filter_er_ok = false, filter_adx_ok = false;
+
+// Status penutupan basket: TP sudah tersentuh tapi belum semua posisi tertutup.
+// Selama flag aktif, EA terus mencoba menutup tiap tick (apa pun harganya)
+// sampai arah tersebut kosong, dan entry/averaging arah itu ditahan.
+bool closing_buy = false, closing_sell = false;
 
 // --- FUNGSI INISIALISASI UTAMA ---
 int OnInit()
@@ -247,6 +281,18 @@ void OnTick()
         }
      }
      
+   // --- LANJUTKAN PENUTUPAN BASKET YANG TERTUNDA (dari tick sebelumnya) ---
+   if(closing_sell)
+     {
+      if(sell_count == 0) closing_sell = false;
+      else CloseAll(POSITION_TYPE_SELL);
+     }
+   if(closing_buy)
+     {
+      if(buy_count == 0) closing_buy = false;
+      else CloseAll(POSITION_TYPE_BUY);
+     }
+
    // --- FILTER SIDEWAYS (BB Width % + Efficiency Ratio + ADX) ---
    UpdateSidewaysFilter();
    bool is_sideways = (filter_bb_ok && filter_er_ok && filter_adx_ok);
@@ -277,15 +323,25 @@ void OnTick()
    bool in_blackout = IsManualBlackout();
    bool news_ok = !InpUseNewsFilter || (!news_active && !in_blackout);
 
-   bool entry_allowed = is_trading_time && is_sideways && spread_ok && news_ok;
+   // Guard intra-candle (dicek tiap tick): filter sideways hanya menilai candle
+   // yang sudah tertutup, sehingga breakout di tengah candle berjalan tidak
+   // terlihat sampai 15 menit kemudian. Guard ini menutup celah itu: jika range
+   // candle filter yang SEDANG berjalan sudah melebihi X% lebar BB, market
+   // sedang bergerak cepat -> entry awal ditahan sampai candle selesai dan
+   // filter menilai ulang. Averaging tidak terpengaruh.
+   double intra_range = iHigh(_Symbol, InpFilterTimeFrame, 0) - iLow(_Symbol, InpFilterTimeFrame, 0);
+   double intra_max   = bb_width * InpMaxIntraRangePct / 100.0;
+   bool   intra_ok    = !InpUseIntraGuard || !zone_ready || (intra_range <= intra_max);
 
-   if(sell_count == 0 && entry_allowed && sell_zone_ok)
+   bool entry_allowed = is_trading_time && is_sideways && spread_ok && news_ok && intra_ok;
+
+   if(sell_count == 0 && !closing_sell && entry_allowed && sell_zone_ok)
      {
       if(!trade.Sell(CalculateLot(InpInitialLot), _Symbol, bid, 0, 0, "First Auto Sell"))
          Print("Gagal First Auto Sell: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
      }
 
-   if(buy_count == 0 && entry_allowed && buy_zone_ok)
+   if(buy_count == 0 && !closing_buy && entry_allowed && buy_zone_ok)
      {
       if(!trade.Buy(CalculateLot(InpInitialLot), _Symbol, ask, 0, 0, "First Auto Buy"))
          Print("Gagal First Auto Buy: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
@@ -295,46 +351,34 @@ void OnTick()
    string tf_filter = EnumToString(InpFilterTimeFrame);
    string tf_adx    = EnumToString(InpADXTimeFrame);
 
-   string dashboard = "=== EA MARTINGALE (SIDEWAYS FILTER) v4.2 ===\n";
-   dashboard += "Server: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + " | Sesi: " + (InpUseSessionFilter ? (string)(is_trading_time ? "ON (WIB)" : "OFF (WIB)") : "24 JAM") + "\n";
-   dashboard += "Bid: " + DoubleToString(bid, _Digits) + " | Ask: " + DoubleToString(ask, _Digits) + " | Spread: " + DoubleToString(spread, _Digits);
-   dashboard += (InpMaxSpread > 0 ? " (maks " + DoubleToString(InpMaxSpread, _Digits) + ") " + (spread_ok ? "[OK]" : "[X]") : " (filter off)") + "\n\n";
+   // Dashboard dibuat sepadat mungkin: Comment() tidak bisa scroll, teks yang
+   // terlalu panjang terpotong di bawah chart. Target <= 14 baris.
+   string dashboard = "=== EA AVG MARTINGALE v4.3 | " + TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES) + " | Sesi: " + (InpUseSessionFilter ? (string)(is_trading_time ? "ON" : "OFF") : "24JAM") + " ===\n";
+   dashboard += "Bid " + DoubleToString(bid, _Digits) + " | Ask " + DoubleToString(ask, _Digits) + " | Spread " + DoubleToString(spread, _Digits) + (InpMaxSpread > 0 ? "/" + DoubleToString(InpMaxSpread, _Digits) + " " + (spread_ok ? "[OK]" : "[X]") : " (off)") + "\n";
 
-   dashboard += "--- FILTER NEWS ---\n";
    if(!InpUseNewsFilter)
-      dashboard += "Nonaktif\n";
+      dashboard += "News: nonaktif\n";
    else
      {
-      dashboard += "Kalender: " + (news_calendar_ok ? "aktif (" + InpNewsCurrencies + ", " + (InpNewsHighOnly ? "HIGH" : "HIGH+MED") + ")" : "TIDAK TERSEDIA (tester/offline) - hanya blackout manual") + "\n";
+      string news_line = "News: ";
       if(news_active)
-         dashboard += "SEDANG BERITA: " + news_active_name + " @ " + TimeToString(news_active_time, TIME_MINUTES) + " server  [X]\n";
-      else if(news_calendar_ok)
-         dashboard += "Berita berikutnya: " + (news_next_time > 0 ? news_next_name + " @ " + TimeToString(news_next_time, TIME_DATE|TIME_MINUTES) + " server" : "tidak ada dalam 24 jam") + "  [OK]\n";
-      dashboard += "Blackout manual WIB: " + InpBlackout1 + (InpBlackout2 != "" ? ", " + InpBlackout2 : "") + (InpBlackout3 != "" ? ", " + InpBlackout3 : "") + "  " + (in_blackout ? "[X AKTIF]" : "[OK]") + "\n";
+         news_line += "[X] " + news_active_name + " @ " + TimeToString(news_active_time, TIME_MINUTES);
+      else
+         news_line += (news_calendar_ok ? "[OK]" : "[kalender off]");
+      news_line += " | Blackout " + (in_blackout ? "[X AKTIF]" : "[OK]");
+      if(!news_active && news_calendar_ok && news_next_time > 0)
+         news_line += " | Next: " + news_next_name + " @ " + TimeToString(news_next_time, TIME_MINUTES);
+      dashboard += news_line + "\n";
      }
+
+   dashboard += "--- FILTER " + tf_filter + " (upd " + TimeToString(filter_last_bar, TIME_MINUTES) + ") ---\n";
+   dashboard += "[1] BB(" + IntegerToString(InpBBPeriod) + "," + DoubleToString(InpBBDeviation, 1) + ") " + DoubleToString(filter_bb_lower, _Digits) + " / " + DoubleToString(filter_bb_middle, _Digits) + " / " + DoubleToString(filter_bb_upper, _Digits) + " | Lebar " + DoubleToString(filter_bb_width_pct, 3) + "%/" + DoubleToString(InpMaxBBWidthPct, 2) + "% " + (filter_bb_ok ? "[OK]" : "[X]") + "\n";
+   dashboard += "[2] ER(" + IntegerToString(InpERPeriod) + ") " + DoubleToString(filter_er, 3) + "/" + DoubleToString(InpMaxER, 2) + " " + (filter_er_ok ? "[OK]" : "[X]") + " | [3] DI " + DoubleToString(filter_di_spread, 1) + "/" + DoubleToString(InpMaxDISpread, 1) + " (" + (filter_di_plus > filter_di_minus ? "NAIK" : "TURUN") + ") | ADX " + DoubleToString(filter_adx, 1) + " " + (filter_adx_rising ? "naik3x" : (filter_adx_falling ? "turun3x" : "datar")) + " " + (filter_adx_ok ? "[OK]" : "[X]") + "\n";
+   dashboard += ">> " + (string)(is_sideways ? "SIDEWAYS - Entry Diizinkan" : "TRENDING - Entry Ditahan");
+   if(InpUseIntraGuard)
+      dashboard += " | Guard " + DoubleToString(intra_range, _Digits) + "/" + DoubleToString(intra_max, _Digits) + " " + (intra_ok ? "[OK]" : "[X DITAHAN]");
    dashboard += "\n";
-
-   dashboard += "--- FILTER SIDEWAYS (update: " + TimeToString(filter_last_bar, TIME_DATE|TIME_MINUTES) + ") ---\n";
-   dashboard += "[1] Bollinger Bands " + tf_filter + " (" + IntegerToString(InpBBPeriod) + ", " + DoubleToString(InpBBDeviation, 1) + ")\n";
-   dashboard += "    Upper : " + DoubleToString(filter_bb_upper, _Digits) + "\n";
-   dashboard += "    Middle: " + DoubleToString(filter_bb_middle, _Digits) + "\n";
-   dashboard += "    Lower : " + DoubleToString(filter_bb_lower, _Digits) + "\n";
-   dashboard += "    Lebar : " + DoubleToString(filter_bb_upper - filter_bb_lower, _Digits) + " = " + DoubleToString(filter_bb_width_pct, 3) + "%  (maks " + DoubleToString(InpMaxBBWidthPct, 2) + "%)  " + (filter_bb_ok ? "[OK]" : "[X]") + "\n";
-   dashboard += "[2] Efficiency Ratio " + tf_filter + " (" + IntegerToString(InpERPeriod) + " candle)\n";
-   dashboard += "    Jarak bersih: " + DoubleToString(filter_er_net, _Digits) + " | Total jalan: " + DoubleToString(filter_er_total, _Digits) + "\n";
-   dashboard += "    ER    : " + DoubleToString(filter_er, 3) + "  (maks " + DoubleToString(InpMaxER, 2) + ")  " + (filter_er_ok ? "[OK]" : "[X]") + "\n";
-   dashboard += "[3] Arah Tren " + tf_adx + " (ADX/DI " + IntegerToString(InpADXPeriod) + ")\n";
-   dashboard += "    +DI: " + DoubleToString(filter_di_plus, 1) + " | -DI: " + DoubleToString(filter_di_minus, 1) + " | Dominan: " + (filter_di_plus > filter_di_minus ? "NAIK" : "TURUN") + "\n";
-   dashboard += "    DI Spread: " + DoubleToString(filter_di_spread, 1) + "  (maks " + DoubleToString(InpMaxDISpread, 1) + ")  " + (filter_di_spread < InpMaxDISpread ? "[OK]" : "[X]") + "\n";
-   dashboard += "    ADX: " + DoubleToString(filter_adx, 1) + " " + (filter_adx_rising ? "NAIK 3x" : (filter_adx_falling ? "TURUN 3x" : "datar")) + "  (rem jika naik & > " + DoubleToString(InpADXRiseFloor, 0) + ")  " + ((filter_adx_rising && filter_adx > InpADXRiseFloor) ? "[X TREN MEMBANGUN]" : "[OK]") + "\n";
-   dashboard += "    Hasil : " + (filter_adx_ok ? "[OK]" : "[X]") + "\n";
-   dashboard += ">> STATUS: " + (string)(is_sideways ? "SIDEWAYS - Entry Diizinkan" : "TRENDING - Entry Ditahan") + "\n\n";
-
-   dashboard += "--- ZONA ENTRY BB (" + DoubleToString(InpBBZonePct, 0) + "% dari tepi" + (InpDirectionalZone ? ", arah terpisah" : ", hedging") + ") ---\n";
-   dashboard += "Batas Atas : " + DoubleToString(zone_upper, _Digits) + "\n";
-   dashboard += "Batas Bawah: " + DoubleToString(zone_lower, _Digits) + "\n";
-   dashboard += "Posisi Harga: " + (bb_width > 0 ? DoubleToString((bid - filter_bb_lower) / bb_width * 100.0, 1) + "% dari lower" : "-") + "\n";
-   dashboard += "Sell: " + (sell_zone_ok ? "[ZONA OK]" : "[DI LUAR ZONA]") + " | Buy: " + (buy_zone_ok ? "[ZONA OK]" : "[DI LUAR ZONA]") + "\n\n";
+   dashboard += "Zona " + DoubleToString(zone_lower, _Digits) + " - " + DoubleToString(zone_upper, _Digits) + " | Harga " + (bb_width > 0 ? DoubleToString((bid - filter_bb_lower) / bb_width * 100.0, 1) + "%" : "-") + " | Sell " + (sell_zone_ok ? "[OK]" : "[X]") + " Buy " + (buy_zone_ok ? "[OK]" : "[X]") + "\n";
    
    // --- AVERAGING & TAKE PROFIT LOGIC (SELL) ---
    if(sell_count > 0 && sum_sell_volume > 0)
@@ -347,32 +391,29 @@ void OnTick()
       if(sell_count == 1)
         {
          tp = bep - InpTakeProfitSingle;
-         tp_mode_sell = "Mode Single Posisi";
+         tp_mode_sell = "Single";
         }
       else
         {
-         tp = bep - InpTakeProfitBEP1;
-         tp_mode_sell = "Mode Averaging (BEP)";
+         tp = bep - InpTakeProfitBEP;
+         tp_mode_sell = "Avg BEP";
         }
 
       double next_sell_price = last_sell_price + InpGridDistance;
 
-      dashboard += "--- STATUS SELL ---\n";
-      dashboard += "Total Posisi: " + IntegerToString(sell_count) + " / " + IntegerToString(InpMaxPositions) + " (" + tp_mode_sell + ")\n";
-      dashboard += "Total Lot: " + DoubleToString(sum_sell_volume, 2) + " | Floating: $" + DoubleToString(floating_sell, 2) + "\n";
-      dashboard += "Syarat Jarak Buka Berikutnya: " + DoubleToString(next_sell_price, _Digits) + "\n";
-      dashboard += "Harga BEP Rata-rata: " + DoubleToString(bep, _Digits) + "\n";
-      dashboard += "Target Close (TP) di Harga: " + DoubleToString(tp, _Digits) + "\n\n";
+      dashboard += "SELL " + IntegerToString(sell_count) + "/" + IntegerToString(InpMaxPositions) + " | Lot " + DoubleToString(sum_sell_volume, 2) + " | Float $" + DoubleToString(floating_sell, 2) + " (" + tp_mode_sell + ")" + (closing_sell ? " [MENUTUP SEMUA...]" : "") + "\n";
+      dashboard += "   Next " + DoubleToString(next_sell_price, _Digits) + " | BEP " + DoubleToString(bep, _Digits) + " | TP " + DoubleToString(tp, _Digits) + "\n";
 
       // Buka Posisi Martingale Baru
-      if(sell_count < InpMaxPositions && last_sell_price > 0 && bid >= next_sell_price)
+      if(sell_count < InpMaxPositions && !closing_sell && last_sell_price > 0 && bid >= next_sell_price)
         {
          double new_lot = CalculateLot(initial_sell_lot * MathPow(InpLotMultiplier, sell_count));
          if(!trade.Sell(new_lot, _Symbol, bid, 0, 0, "Auto Averaging Sell"))
             Print("Gagal Averaging Sell: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
         }
-      if(ask <= tp && tp > 0)
+      if(ask <= tp && tp > 0 && !closing_sell)
         {
+         closing_sell = true; // kunci keputusan TP: terus ditutup walau harga bergerak
          CloseAll(POSITION_TYPE_SELL);
         }
      }
@@ -388,32 +429,29 @@ void OnTick()
       if(buy_count == 1)
         {
          tp = bep + InpTakeProfitSingle;
-         tp_mode_buy = "Mode Single Posisi";
+         tp_mode_buy = "Single";
         }
       else
         {
-         tp = bep + InpTakeProfitBEP1;
-         tp_mode_buy = "Mode Averaging (BEP)";
+         tp = bep + InpTakeProfitBEP;
+         tp_mode_buy = "Avg BEP";
         }
 
       double next_buy_price = last_buy_price - InpGridDistance;
 
-      dashboard += "--- STATUS BUY ---\n";
-      dashboard += "Total Posisi: " + IntegerToString(buy_count) + " / " + IntegerToString(InpMaxPositions) + " (" + tp_mode_buy + ")\n";
-      dashboard += "Total Lot: " + DoubleToString(sum_buy_volume, 2) + " | Floating: $" + DoubleToString(floating_buy, 2) + "\n";
-      dashboard += "Syarat Jarak Buka Berikutnya: " + DoubleToString(next_buy_price, _Digits) + "\n";
-      dashboard += "Harga BEP Rata-rata: " + DoubleToString(bep, _Digits) + "\n";
-      dashboard += "Target Close (TP) di Harga: " + DoubleToString(tp, _Digits) + "\n\n";
+      dashboard += "BUY  " + IntegerToString(buy_count) + "/" + IntegerToString(InpMaxPositions) + " | Lot " + DoubleToString(sum_buy_volume, 2) + " | Float $" + DoubleToString(floating_buy, 2) + " (" + tp_mode_buy + ")" + (closing_buy ? " [MENUTUP SEMUA...]" : "") + "\n";
+      dashboard += "   Next " + DoubleToString(next_buy_price, _Digits) + " | BEP " + DoubleToString(bep, _Digits) + " | TP " + DoubleToString(tp, _Digits) + "\n";
 
       // Buka Posisi Martingale Baru
-      if(buy_count < InpMaxPositions && last_buy_price > 0 && ask <= next_buy_price)
+      if(buy_count < InpMaxPositions && !closing_buy && last_buy_price > 0 && ask <= next_buy_price)
         {
          double new_lot = CalculateLot(initial_buy_lot * MathPow(InpLotMultiplier, buy_count));
          if(!trade.Buy(new_lot, _Symbol, ask, 0, 0, "Auto Averaging Buy"))
             Print("Gagal Averaging Buy: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
         }
-      if(bid >= tp && tp > 0)
+      if(bid >= tp && tp > 0 && !closing_buy)
         {
+         closing_buy = true; // kunci keputusan TP: terus ditutup walau harga bergerak
          CloseAll(POSITION_TYPE_BUY);
         }
      }
@@ -612,19 +650,32 @@ bool IsTradingTime()
   }
 
 // --- FUNGSI TUTUP SEMUA POSISI (TAKE PROFIT) ---
+// Mode ASYNC: semua permintaan close dikirim sekaligus tanpa menunggu balasan
+// server satu per satu, sehingga basket besar tertutup jauh lebih cepat.
+// Konsekuensi: return true hanya berarti permintaan TERKIRIM, bukan tereksekusi.
+// Jaring pengaman = flag closing_buy/closing_sell di OnTick: posisi yang ternyata
+// masih hidup (ditolak/gagal di server) otomatis dikirim ulang tick berikutnya.
+// Async hanya aktif di dalam fungsi ini; entry & averaging tetap sinkron.
 void CloseAll(long pos_type)
   {
+   trade.SetAsyncMode(true);
+
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
       if(PositionGetString(POSITION_SYMBOL) == _Symbol)
         {
          if((PositionGetInteger(POSITION_MAGIC) == 0 || PositionGetInteger(POSITION_MAGIC) == InpMagicNumber) && PositionGetInteger(POSITION_TYPE) == pos_type)
            {
-            trade.PositionClose(ticket);
+            if(!trade.PositionClose(ticket))
+               Print("Gagal kirim close posisi #", ticket, ": ", trade.ResultRetcode(), " - ",
+                     trade.ResultRetcodeDescription(), " (dicoba lagi tick berikutnya)");
            }
         }
      }
+
+   trade.SetAsyncMode(false);
   }
 
 // --- FUNGSI PERHITUNGAN LOT AMAN ---
