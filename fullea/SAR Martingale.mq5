@@ -14,7 +14,7 @@ input int    TakeProfit_Pips   = 1000;    // Target Profit (Pips)
 input int    StopLoss_Pips     = 1000;    // Stop Loss (Pips)
 input ulong  Slippage          = 40;      // Slippage Maksimal (Points)
 input ulong  MagicNumber       = 12345;   // Magic Number EA
-input int    MaxMartingaleStep = 5;       // Batas Step Martingale (0 = tanpa batas)
+input int    MaxMartingaleStep = 3;       // Batas Step: setelah ini entry tunggu sinyal ADX (0 = tanpa batas)
 input int    MaxSpread_Points  = 50;      // Spread Maksimal untuk Entry (Points, 0 = abaikan)
 input bool   UseADXFilter      = true;    // Filter Sideway (ADX) untuk Entry Awal
 input ENUM_TIMEFRAMES ADX_Timeframe = PERIOD_CURRENT; // Timeframe ADX
@@ -32,6 +32,7 @@ string eaStatus      = "Inisialisasi...";
 int    nextDirection = ORDER_TYPE_BUY;
 double nextLot       = 0;
 int    lossStreak    = 0;
+bool   waitTrendSignal = true; // Entry berikutnya harus menunggu sinyal ADX (entry awal / batas step tercapai)
 
 // Statistik histori trade EA (dihitung ulang hanya saat ada deal baru)
 int      statTotalTrades = 0;
@@ -117,13 +118,17 @@ void OnTick()
       GetLastTradeInfo(nextDirection, nextLot, lossStreak);
       UpdateTradeStats(); // Hitung ulang statistik untuk tampilan Comment
 
-      // Batas step martingale: jika loss beruntun mencapai batas, reset ke lot awal
+      // Filter ADX berlaku untuk entry awal siklus (belum ada loss beruntun)
+      waitTrendSignal = (lossStreak == 0);
+
+      // Batas step martingale: jika loss beruntun mencapai batas, lot TETAP
+      // melanjutkan martingale (2x lot loss terakhir), tetapi entry berikutnya
+      // harus menunggu sinyal trend (ADX) dulu seperti entry awal
       if(MaxMartingaleStep > 0 && lossStreak >= MaxMartingaleStep)
         {
-         PrintFormat("Batas martingale %d step tercapai (loss beruntun %d). Lot direset ke %.2f.",
-                     MaxMartingaleStep, lossStreak, InitialLot);
-         nextLot    = InitialLot;
-         lossStreak = 0; // Dianggap memulai siklus baru (filter entry awal berlaku)
+         PrintFormat("Batas martingale %d step tercapai (loss beruntun %d). Entry lanjutan lot %.2f menunggu sinyal ADX.",
+                     MaxMartingaleStep, lossStreak, nextLot);
+         waitTrendSignal = true;
         }
 
       needHistoryScan = false;
@@ -159,10 +164,11 @@ void OnTick()
       return;
      }
 
-   // Filter sideway (ADX) HANYA untuk entry awal siklus (lossStreak == 0).
-   // Entry lanjutan martingale (switching setelah loss) tidak difilter agar
+   // Filter sideway (ADX) berlaku untuk entry awal siklus DAN entry setelah
+   // batas step martingale tercapai. Entry lanjutan martingale biasa
+   // (switching setelah loss, di bawah batas step) tidak difilter agar
    // urutan recovery tidak terputus.
-   if(lossStreak == 0 && UseADXFilter && !IsTrending())
+   if(waitTrendSignal && UseADXFilter && !IsTrending())
      {
       if(canLog)
         {
@@ -352,8 +358,9 @@ void UpdateChartComment()
       text += StringFormat("Entry next  : %s %.2f lot (multiplier x%.1f)\n",
                            (nextDirection == ORDER_TYPE_BUY) ? "BUY" : "SELL", nextLot, LotMultiplier);
      }
-   text += StringFormat("Step        : %d dari %s\n", lossStreak,
-                        (MaxMartingaleStep > 0) ? IntegerToString(MaxMartingaleStep) : "tanpa batas");
+   text += StringFormat("Step        : %d dari %s%s\n", lossStreak,
+                        (MaxMartingaleStep > 0) ? IntegerToString(MaxMartingaleStep) : "tanpa batas",
+                        (MaxMartingaleStep > 0 && lossStreak >= MaxMartingaleStep) ? " (tunggu sinyal ADX)" : "");
    text += "Trade akhir : " + statLastTrade + "\n";
    text += "---------------------------------------------\n";
    text += StringFormat("Hari ini    : %d trade | P/L %.2f %s\n",
