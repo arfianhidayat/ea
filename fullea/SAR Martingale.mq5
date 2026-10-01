@@ -3,7 +3,7 @@
 //|                                                Hak Cipta 2026    |
 //+------------------------------------------------------------------+
 #property copyright "Trader Saham & Forex"
-#property version   "1.10"
+#property version   "1.20"
 
 #include <Trade\Trade.mqh>
 
@@ -14,9 +14,14 @@ input int    TakeProfit_Pips   = 1000;    // Target Profit (Pips)
 input int    StopLoss_Pips     = 1000;    // Stop Loss (Pips)
 input ulong  Slippage          = 40;      // Slippage Maksimal (Points)
 input ulong  MagicNumber       = 12345;   // Magic Number EA
-input int    MaxMartingaleStep = 3;       // Batas Step: setelah ini entry tunggu sinyal ADX (0 = tanpa batas)
+input int    MaxMartingaleStep = 3;       // Batas Step: setelah ini entry tunggu sinyal entry (0 = tanpa batas)
 input int    MaxSpread_Points  = 50;      // Spread Maksimal untuk Entry (Points, 0 = abaikan)
-input bool   UseADXFilter      = true;    // Filter Sideway (ADX) untuk Entry Awal
+input group "=== SINYAL ENTRY UT BOT (Entry Awal) ==="
+input bool   UseUTBotSignal    = true;    // Sinyal UT Bot: arah entry awal mengikuti sinyal
+input double UTBot_KeyValue    = 1.0;     // Key Value (sensitivitas trailing ATR)
+input int    UTBot_ATR_Period  = 10;      // Periode ATR UT Bot
+input group "=== KONFIRMASI ADX (Filter Sideway) ==="
+input bool   UseADXFilter      = true;    // Konfirmasi ADX untuk entry awal (bersama sinyal UT Bot)
 input ENUM_TIMEFRAMES ADX_Timeframe = PERIOD_CURRENT; // Timeframe ADX
 input int    ADX_Period        = 14;      // Periode ADX
 input double ADX_Threshold     = 35.0;    // Minimal ADX (di bawah ini = sideway, tunda entry awal)
@@ -27,12 +32,19 @@ int    adxHandle = INVALID_HANDLE;
 double lastADXValue = 0; // Nilai ADX terakhir yang terbaca (untuk log diagnostik)
 bool   needHistoryScan = true; // Penanda agar scan histori hanya dilakukan saat ada perubahan
 
+// State sinyal UT Bot (trailing stop berbasis ATR, dievaluasi per bar baru)
+int      utbotAtrHandle  = INVALID_HANDLE;
+double   utbotTS         = 0;     // Garis trailing stop UT Bot
+bool     utbotBuySignal  = false; // Sinyal Buy: close menembus trailing dari bawah
+bool     utbotSellSignal = false; // Sinyal Sell: close menembus trailing dari atas
+datetime utbotLastBar    = 0;     // Bar terakhir yang sudah dievaluasi
+
 // Variabel status untuk ditampilkan pada Comment di chart
 string eaStatus      = "Inisialisasi...";
 int    nextDirection = ORDER_TYPE_BUY;
 double nextLot       = 0;
 int    lossStreak    = 0;
-bool   waitTrendSignal = true; // Entry berikutnya harus menunggu sinyal ADX (entry awal / batas step tercapai)
+bool   waitTrendSignal = true; // Entry berikutnya harus menunggu sinyal entry (entry awal / batas step tercapai)
 
 // Statistik histori trade EA (dihitung ulang hanya saat ada deal baru)
 int      statTotalTrades = 0;
@@ -77,6 +89,17 @@ int OnInit()
         }
      }
 
+   // Membuat handle ATR untuk sinyal entry UT Bot
+   if(UseUTBotSignal)
+     {
+      utbotAtrHandle = iATR(_Symbol, _Period, UTBot_ATR_Period);
+      if(utbotAtrHandle == INVALID_HANDLE)
+        {
+         Print("Gagal membuat handle ATR UT Bot, error: ", GetLastError());
+         return(INIT_FAILED);
+        }
+     }
+
    startBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    needHistoryScan = true;
    return(INIT_SUCCEEDED);
@@ -89,6 +112,8 @@ void OnDeinit(const int reason)
   {
    if(adxHandle != INVALID_HANDLE)
       IndicatorRelease(adxHandle);
+   if(utbotAtrHandle != INVALID_HANDLE)
+      IndicatorRelease(utbotAtrHandle);
    Comment(""); // Bersihkan tampilan comment saat EA dilepas
   }
 
@@ -109,6 +134,10 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   // Perbarui kalkulasi trailing stop & sinyal UT Bot (hanya bekerja di bar baru).
+   // Harus selalu dipanggil agar garis trailing tetap terhitung walau sedang ada posisi.
+   UpdateUTBotSignal();
+
    // Scan histori hanya saat ada deal baru (bukan setiap tick) agar ringan
    if(needHistoryScan)
      {
@@ -123,10 +152,10 @@ void OnTick()
 
       // Batas step martingale: jika loss beruntun mencapai batas, lot TETAP
       // melanjutkan martingale (2x lot loss terakhir), tetapi entry berikutnya
-      // harus menunggu sinyal trend (ADX) dulu seperti entry awal
+      // harus menunggu sinyal entry (UT Bot/ADX) dulu seperti entry awal
       if(MaxMartingaleStep > 0 && lossStreak >= MaxMartingaleStep)
         {
-         PrintFormat("Batas martingale %d step tercapai (loss beruntun %d). Entry lanjutan lot %.2f menunggu sinyal ADX.",
+         PrintFormat("Batas martingale %d step tercapai (loss beruntun %d). Entry lanjutan lot %.2f menunggu sinyal entry.",
                      MaxMartingaleStep, lossStreak, nextLot);
          waitTrendSignal = true;
         }
@@ -164,20 +193,37 @@ void OnTick()
       return;
      }
 
-   // Filter sideway (ADX) berlaku untuk entry awal siklus DAN entry setelah
-   // batas step martingale tercapai. Entry lanjutan martingale biasa
-   // (switching setelah loss, di bawah batas step) tidak difilter agar
-   // urutan recovery tidak terputus.
-   if(waitTrendSignal && UseADXFilter && !IsTrending())
+   // Sinyal entry berlaku untuk entry awal siklus DAN entry setelah batas step
+   // martingale tercapai. Entry lanjutan martingale biasa (switching setelah
+   // loss, di bawah batas step) tidak difilter agar recovery tidak terputus.
+   if(waitTrendSignal)
      {
-      if(canLog)
+      // 1. Sinyal UT Bot: penentu timing DAN arah entry.
+      //    Sinyal hanya berlaku selama bar sinyal masih berjalan, setelah itu hangus.
+      if(UseUTBotSignal)
         {
-         PrintFormat("Entry ditahan: ADX %.1f di bawah ambang %.1f (sideway).", lastADXValue, ADX_Threshold);
-         lastFilterLog = TimeCurrent();
+         if(!utbotBuySignal && !utbotSellSignal)
+           {
+            eaStatus = StringFormat("MENUNGGU sinyal UT Bot (TS %s)", DoubleToString(utbotTS, _Digits));
+            UpdateChartComment();
+            return;
+           }
+         // Arah entry awal mengikuti sinyal, menggantikan arah dari histori
+         nextDirection = utbotBuySignal ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
         }
-      eaStatus = StringFormat("DITAHAN: sideway (ADX %.1f < %.1f)", lastADXValue, ADX_Threshold);
-      UpdateChartComment();
-      return; // Pasar sideway: tunggu sampai ADX di atas ambang
+
+      // 2. Konfirmasi ADX: pastikan pasar tidak sideway saat sinyal muncul
+      if(UseADXFilter && !IsTrending())
+        {
+         if(canLog)
+           {
+            PrintFormat("Entry ditahan: ADX %.1f di bawah ambang %.1f (sideway).", lastADXValue, ADX_Threshold);
+            lastFilterLog = TimeCurrent();
+           }
+         eaStatus = StringFormat("DITAHAN: sideway (ADX %.1f < %.1f)", lastADXValue, ADX_Threshold);
+         UpdateChartComment();
+         return; // Pasar sideway: tunggu sampai ADX di atas ambang
+        }
      }
 
    // Menormalkan ukuran lot sesuai batasan minimal dan maksimal broker
@@ -209,9 +255,62 @@ void OnTick()
                               trade.ResultRetcodeDescription(), trade.ResultRetcode());
      }
    else
+     {
       eaStatus = "Order terkirim";
+      // Sinyal UT Bot sudah terpakai: hapus agar tidak memicu entry kedua
+      utbotBuySignal  = false;
+      utbotSellSignal = false;
+     }
 
    UpdateChartComment();
+  }
+
+//+------------------------------------------------------------------+
+//| Fungsi internal: Kalkulasi trailing stop & sinyal UT Bot          |
+//| Dievaluasi sekali per bar baru dari candle yang sudah selesai.    |
+//| Sinyal berlaku selama bar sinyal berjalan, hangus di bar baru.    |
+//+------------------------------------------------------------------+
+void UpdateUTBotSignal()
+  {
+   if(!UseUTBotSignal)
+      return;
+
+   datetime curBar = iTime(_Symbol, _Period, 0);
+   if(curBar == 0 || curBar == utbotLastBar)
+      return; // Masih di bar yang sama: tidak ada kalkulasi ulang
+
+   double atrBuf[1];
+   if(CopyBuffer(utbotAtrHandle, 0, 1, 1, atrBuf) < 1)
+      return; // Data ATR belum siap: bar belum ditandai, coba lagi tick berikutnya
+
+   double src      = iClose(_Symbol, _Period, 1); // Close candle yang baru selesai
+   double src_prev = iClose(_Symbol, _Period, 2);
+   double nLoss    = UTBot_KeyValue * atrBuf[0];
+
+   // Kalkulasi trailing stop dinamis (logika UT Bot)
+   double ts = utbotTS;
+   if(src > utbotTS && src_prev > utbotTS)
+      ts = MathMax(utbotTS, src - nLoss);
+   else if(src < utbotTS && src_prev < utbotTS)
+      ts = MathMin(utbotTS, src + nLoss);
+   else if(src > utbotTS)
+      ts = src - nLoss;
+   else
+      ts = src + nLoss;
+
+   // Sinyal terjadi saat close menembus garis trailing (crossing)
+   utbotBuySignal  = (src > ts) && (src_prev <= utbotTS);
+   utbotSellSignal = (src < ts) && (src_prev >= utbotTS);
+
+   if(utbotBuySignal)
+      PrintFormat("Sinyal UT Bot: BUY (close %s menembus TS %s)",
+                  DoubleToString(src, _Digits), DoubleToString(utbotTS, _Digits));
+   if(utbotSellSignal)
+      PrintFormat("Sinyal UT Bot: SELL (close %s menembus TS %s)",
+                  DoubleToString(src, _Digits), DoubleToString(utbotTS, _Digits));
+
+   utbotTS      = ts;
+   utbotLastBar = curBar;
   }
 
 //+------------------------------------------------------------------+
@@ -318,6 +417,14 @@ void UpdateChartComment()
                     ? StringFormat("%.1f (ambang %.1f)", lastADXValue, ADX_Threshold)
                     : "OFF";
 
+   string utbotInfo = "OFF";
+   if(UseUTBotSignal)
+     {
+      if(utbotBuySignal)       utbotInfo = "SINYAL BUY";
+      else if(utbotSellSignal) utbotInfo = "SINYAL SELL";
+      else                     utbotInfo = "menunggu (TS " + DoubleToString(utbotTS, _Digits) + ")";
+     }
+
    // Win rate keseluruhan
    double winRate = (statTotalTrades > 0) ? (100.0 * statWins / statTotalTrades) : 0;
 
@@ -335,7 +442,7 @@ void UpdateChartComment()
    double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
 
    string text = "\n"; // Baris kosong agar tidak tertutup nama EA di pojok chart
-   text += "=== SAR MARTINGALE v1.10 ===\n";
+   text += "=== SAR MARTINGALE v1.20 ===\n";
    text += StringFormat("%s %s | Server: %s\n", _Symbol, EnumToString(_Period),
                         TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
    text += "AutoTrading : " + tradeAllowed + "\n";
@@ -344,6 +451,7 @@ void UpdateChartComment()
    text += StringFormat("Bid/Ask     : %s / %s\n",
                         DoubleToString(bid, _Digits), DoubleToString(ask, _Digits));
    text += StringFormat("Spread      : %.0f pts (maks %d)\n", spreadPoints, MaxSpread_Points);
+   text += "UT Bot      : " + utbotInfo + "\n";
    text += "ADX         : " + adxInfo + "\n";
    text += "---------------------------------------------\n";
    if(posCount > 0)
@@ -355,12 +463,16 @@ void UpdateChartComment()
      }
    else
      {
-      text += StringFormat("Entry next  : %s %.2f lot (multiplier x%.1f)\n",
-                           (nextDirection == ORDER_TYPE_BUY) ? "BUY" : "SELL", nextLot, LotMultiplier);
+      // Saat menunggu sinyal UT Bot, arah entry belum diketahui (ikut sinyal)
+      string dirText = (waitTrendSignal && UseUTBotSignal)
+                       ? "ikut sinyal UT Bot"
+                       : ((nextDirection == ORDER_TYPE_BUY) ? "BUY" : "SELL");
+      text += StringFormat("Entry next  : %s, %.2f lot (multiplier x%.1f)\n",
+                           dirText, nextLot, LotMultiplier);
      }
    text += StringFormat("Step        : %d dari %s%s\n", lossStreak,
                         (MaxMartingaleStep > 0) ? IntegerToString(MaxMartingaleStep) : "tanpa batas",
-                        (MaxMartingaleStep > 0 && lossStreak >= MaxMartingaleStep) ? " (tunggu sinyal ADX)" : "");
+                        (MaxMartingaleStep > 0 && lossStreak >= MaxMartingaleStep) ? " (tunggu sinyal entry)" : "");
    text += "Trade akhir : " + statLastTrade + "\n";
    text += "---------------------------------------------\n";
    text += StringFormat("Hari ini    : %d trade | P/L %.2f %s\n",
