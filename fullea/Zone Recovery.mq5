@@ -1,13 +1,13 @@
-//+----------------------------------------------------+
-//| ZoneRecoveryEA.mq5                                 |
-//| Zone Recovery Hedging EA untuk XAUUSD              |
-//| Akun harus bertipe HEDGING                         |
-//| PERINGATAN: TANPA STOP LOSS,                       |
-//| TANPA CUT-LOSS PER SIKLUS                          |
-//+----------------------------------------------------+
+//+--------------------------------------------------+
+//| ZoneRecoveryEA.mq5                               |
+//| Zone Recovery Hedging EA untuk XAUUSD            |
+//| Akun harus bertipe HEDGING                       |
+//| PERINGATAN: TANPA STOP LOSS,                     |
+//| TANPA CUT-LOSS PER SIKLUS                        |
+//+--------------------------------------------------+
 //
 // ALUR KERJA EA
-// ------------------------------------------------------
+// ----------------------------------------------------
 // 1. MENUNGGU
 //    Tidak ada posisi/pending EA.
 //    Jika jam WIB masuk jendela, spread OK, ATR OK:
