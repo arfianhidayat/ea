@@ -1,210 +1,401 @@
-//+------------------------------------------------------------------+
-//|                                       SAR_Martingale_XAUUSD.mq5  |
-//|                                                Hak Cipta 2026    |
-//+------------------------------------------------------------------+
-//| CATATAN PERUBAHAN v1.30 (dari v1.20)                             |
-//|  Risiko : plafon lot, equity stop (drawdown %), batas rugi harian,|
-//|           recovery berbasis kerugian riil (opsional), batas umur  |
-//|           posisi, cek margin & volume limit sebelum entry.        |
-//|  Sinyal : state UT Bot dihitung ulang saat init (warm-up), sinyal |
-//|           berlaku N bar & "antre" saat posisi terbuka, cek        |
-//|           konflik arah switching martingale vs trend UT Bot.      |
-//|  Waktu  : hindari rollover, Jumat sore, jam trading, cek sesi.    |
-//|  Teknis : backoff order gagal + henti otomatis, cek akun netting, |
-//|           histori dibatasi sejak EA dipasang (global variable),   |
-//|           log CSV per deal/siklus, notifikasi push.               |
-//+------------------------------------------------------------------+
+//+----------------------------------------------------+
+//| SAR_Martingale_XAUUSD.mq5                          |
+//| Hak Cipta 2026 - Trader Saham & Forex              |
+//+----------------------------------------------------+
+//| RINGKASAN STRATEGI                                 |
+//| - Satu posisi saja, TP = SL (default 1000 pips).   |
+//| - Kena TP (WIN) : lot kembali ke awal, arah sama,  |
+//|   langsung entry lagi tanpa tunggu sinyal.         |
+//| - Kena SL (LOSS): arah dibalik (Stop And Reverse)  |
+//|   dan lot dikali LotMultiplier (martingale).       |
+//| - Entry pertama butuh sinyal UT Bot + ADX.         |
+//+----------------------------------------------------+
+//| STRUKTUR FILE                                      |
+//| 1. Input (parameter yang bisa diubah user)         |
+//| 2. Variabel global (state EA)                      |
+//| 3. OnInit / OnDeinit / OnTradeTransaction          |
+//| 4. OnTick  : alur utama tiap tick                  |
+//| 5. Helper  : hold, halt, risiko, posisi            |
+//| 6. Filter waktu & sesi                             |
+//| 7. UT Bot  : trailing stop, warm-up, sinyal        |
+//| 8. Lot recovery, statistik, log, notifikasi        |
+//| 9. Panel chart (Comment)                           |
+//| 10. Histori deal & normalisasi lot                 |
+//+----------------------------------------------------+
+//| CATATAN PERUBAHAN                                  |
+//| v1.36 Format ulang: lebar baris maks 56 karakter   |
+//|       agar mudah dibaca di layar HP, komentar      |
+//|       ditambah di tiap blok.                       |
+//| v1.35 Setelah WIN langsung entry lot awal tanpa    |
+//|       sinyal (input EntryAfterWinNoSignal).        |
+//| v1.30 Plafon lot, equity stop, batas rugi harian,  |
+//|       recovery riil, umur posisi, cek margin,      |
+//|       warm-up UT Bot, sinyal antre, filter waktu,  |
+//|       backoff order, log CSV, notifikasi push.     |
+//+----------------------------------------------------+
 #property copyright "Trader Saham & Forex"
-#property version   "1.34"
+#property version   "1.36"
 
+// Library standar MQL5 untuk kirim order (CTrade)
 #include <Trade\Trade.mqh>
 
-//--- Parameter dasar
+//====================================================
+// 1. INPUT
+//====================================================
+
+//---------------- DASAR -----------------------------
 input group "=== DASAR ==="
-input double InitialLot        = 0.05;    // Lot Awal (akun cent: 0.05 lot cent = 0.0005 lot standar)
-input double PipSize           = 0.01;    // Ukuran 1 pip dalam harga (Exness XAUUSD: 0.01 = 1 sen; 0 = deteksi otomatis)
-input double LotMultiplier     = 2.0;     // Pengali Lot (Martingale)
-input int    TakeProfit_Pips   = 1000;    // Target Profit (Pips) -> 1000 x 0.01 = $10 (500 = $5, tapi spread jadi 4% dari TP)
-input int    StopLoss_Pips     = 1000;    // Stop Loss (Pips) -> samakan dengan TP agar matematika martingale utuh
-input double Slippage_Pips     = 30.0;    // Slippage Maksimal (pips; 30 = $0.30)
-input ulong  MagicNumber       = 12345;   // Magic Number EA
-input int    MaxMartingaleStep = 2;       // Batas Step: setelah ini entry tunggu sinyal (M5 whipsaw sering; 0 = tanpa batas)
-input double MaxSpread_Pips    = 25.0;    // Spread Maksimal untuk Entry (pips; 25 = $0.25; 0 = abaikan)
 
-//--- Manajemen risiko
+// Lot pertama tiap siklus. Akun cent: 0.05 lot cent
+// = 0.0005 lot standar.
+input double InitialLot = 0.05;   // Lot awal
+
+// Ukuran 1 pip dalam harga. Exness XAUUSD: 0.01
+// (= 1 sen). Isi 0 untuk deteksi otomatis.
+input double PipSize = 0.01;      // Ukuran 1 pip
+
+// Pengali lot setiap kali kena SL (martingale).
+input double LotMultiplier = 2.0; // Pengali lot
+
+// Target profit dalam pips. 1000 x 0.01 = $10.
+input int TakeProfit_Pips = 1000; // TP (pips)
+
+// Stop loss dalam pips. Samakan dengan TP agar
+// matematika martingale tetap utuh.
+input int StopLoss_Pips = 1000;   // SL (pips)
+
+// Slippage maksimal saat order, dalam pips.
+input double Slippage_Pips = 30.0; // Slippage (pips)
+
+// Penanda order milik EA ini.
+input ulong MagicNumber = 12345;  // Magic number
+
+// Setelah N loss beruntun, entry berikutnya harus
+// menunggu sinyal UT Bot lagi. 0 = tanpa batas.
+input int MaxMartingaleStep = 2;  // Batas step
+
+// Tidak entry jika spread di atas nilai ini (pips).
+// 0 = abaikan spread.
+input double MaxSpread_Pips = 25.0; // Spread maks
+
+//---------------- MANAJEMEN RISIKO ------------------
 input group "=== MANAJEMEN RISIKO ==="
-input double MaxLot            = 1.6;     // Plafon lot (1.6 = step 6 dari 0.05; 6.4 = step 8; 0 = ikut maksimal broker)
-input double MaxDrawdownPct    = 30.0;    // Equity stop: henti EA jika equity turun % ini dari balance awal sesi (0 = off)
-input bool   CloseOnEquityStop = true;    // Tutup posisi saat equity stop tercapai
-input double DailyLossLimit    = 1500;    // Batas rugi harian dalam MATA UANG AKUN (akun cent = USC: 1500 = $15; 0 = off)
-input bool   UseLossBasedRecovery = false;// Lot recovery dari kerugian riil (termasuk swap/komisi), bukan x2
-input double RecoveryTargetPips = 200;    // Target profit siklus (pips x lot awal) untuk mode recovery riil
-input int    MaxPositionDays   = 1;       // Tutup posisi jika umur melebihi N hari (target $10 wajarnya selesai < 1 hari; 0 = off)
-input bool   ResetSession      = false;   // Reset balance awal sesi & titik awal histori (set true sekali, lalu false)
 
-//--- Sinyal entry UT Bot
-input group "=== SINYAL ENTRY UT BOT (Entry Awal) ==="
-input bool   UseUTBotSignal    = true;    // Sinyal UT Bot: arah entry awal mengikuti sinyal
-input double UTBot_KeyValue    = 2.0;     // Key Value (M5 gold bising; 2.0 mengurangi sinyal palsu)
-input int    UTBot_ATR_Period  = 10;      // Periode ATR UT Bot
-input ENUM_TIMEFRAMES UTBot_Timeframe = PERIOD_M5; // Timeframe sinyal UT Bot (M5 sepadan dengan target $5-10)
-input int    SignalValidBars   = 3;       // Sinyal berlaku N bar (tidak berkurang saat posisi terbuka = antre)
-input int    WarmupBars        = 300;     // Jumlah bar untuk hitung ulang trailing saat EA dipasang
-input bool   CheckSwitchConflict = true;  // Tunda switching martingale jika trend UT Bot masih berlawanan
+// Plafon lot. 1.6 = step 6 dari 0.05.
+// 0 = ikut lot maksimal broker.
+input double MaxLot = 1.6;        // Plafon lot
 
-//--- Konfirmasi ADX
-input group "=== KONFIRMASI ADX (Filter Sideway) ==="
-input bool   UseADXFilter      = true;    // Konfirmasi ADX untuk entry awal
-input ENUM_TIMEFRAMES ADX_Timeframe = PERIOD_M5; // Timeframe ADX (samakan dengan TF sinyal UT Bot)
-input int    ADX_Period        = 14;      // Periode ADX
-input double ADX_Threshold     = 25.0;    // Minimal ADX (diturunkan dari 35 agar sejalan dengan crossover UT Bot)
+// Henti EA jika equity turun % ini dari balance
+// awal sesi. 0 = nonaktif.
+input double MaxDrawdownPct = 30.0; // Equity stop %
 
-//--- Filter waktu (waktu server)
+// Tutup semua posisi saat equity stop tercapai.
+input bool CloseOnEquityStop = true; // Tutup saat stop
+
+// Batas rugi harian dalam mata uang akun.
+// Akun cent (USC): 1500 = $15. 0 = nonaktif.
+input double DailyLossLimit = 1500; // Rugi harian maks
+
+// true: lot recovery dihitung dari rugi riil
+// (termasuk swap & komisi), bukan sekadar x2.
+input bool UseLossBasedRecovery = false; // Recovery riil
+
+// Target profit per siklus (pips x lot awal)
+// untuk mode recovery riil.
+input double RecoveryTargetPips = 200; // Target siklus
+
+// Tutup posisi jika umurnya lebih dari N hari.
+// 0 = nonaktif.
+input int MaxPositionDays = 1;    // Umur posisi maks
+
+// true sekali untuk reset balance awal sesi dan
+// titik awal histori, lalu kembalikan ke false.
+input bool ResetSession = false;  // Reset sesi
+
+//---------------- SINYAL UT BOT ---------------------
+input group "=== SINYAL ENTRY UT BOT ==="
+
+// Arah entry awal mengikuti sinyal UT Bot.
+input bool UseUTBotSignal = true; // Pakai UT Bot
+
+// Setelah WIN: langsung entry lot awal searah
+// tanpa menunggu sinyal UT Bot dan ADX.
+input bool EntryAfterWinNoSignal = true; // Entry pasca WIN
+
+// Pengali ATR untuk jarak trailing stop UT Bot.
+// Kecil = sinyal sering, besar = sinyal jarang.
+input double UTBot_KeyValue = 2.0; // Key value
+
+// Periode ATR yang dipakai UT Bot.
+input int UTBot_ATR_Period = 10;  // Periode ATR
+
+// Timeframe perhitungan sinyal UT Bot.
+input ENUM_TIMEFRAMES UTBot_Timeframe = PERIOD_M5; // TF
+
+// Sinyal berlaku N bar. Tidak berkurang saat ada
+// posisi terbuka (sinyal "antre").
+input int SignalValidBars = 3;    // Masa berlaku sinyal
+
+// Jumlah bar untuk hitung ulang trailing stop
+// saat EA dipasang (warm-up).
+input int WarmupBars = 300;       // Bar warm-up
+
+// Tunda switching martingale jika trend UT Bot
+// masih berlawanan dengan arah switching.
+input bool CheckSwitchConflict = true; // Cek konflik
+
+//---------------- FILTER ADX ------------------------
+input group "=== KONFIRMASI ADX ==="
+
+// Entry awal butuh ADX di atas ambang (anti sideway).
+input bool UseADXFilter = true;   // Pakai ADX
+
+// Timeframe ADX, samakan dengan TF UT Bot.
+input ENUM_TIMEFRAMES ADX_Timeframe = PERIOD_M5; // TF ADX
+
+// Periode ADX.
+input int ADX_Period = 14;        // Periode ADX
+
+// Nilai minimal ADX agar dianggap trending.
+input double ADX_Threshold = 25.0; // Ambang ADX
+
+//---------------- FILTER WAKTU ----------------------
 input group "=== FILTER WAKTU (waktu server) ==="
-input bool   UseTimeFilter     = true;    // Aktifkan filter waktu
-input int    RolloverHour      = 0;       // Jam rollover server (biasanya 0 = 17:00 New York)
-input int    RolloverBufferMin = 30;      // Hindari entry +/- menit sekitar rollover (Exness server GMT+0, rollover 00:00)
-input int    SessionOpenBufferMin = 15;   // Hindari entry N menit setelah sesi simbol dibuka (gap/spike pembukaan)
-input int    FridayStopHour    = 20;      // Jumat: tidak entry mulai jam ini (0 = off)
-input int    TradeStartHour    = 0;       // Jam mulai boleh entry
-input int    TradeEndHour      = 24;      // Jam akhir boleh entry (24 = sampai tengah malam)
 
-//--- Teknis
+// Aktifkan semua filter waktu di bawah.
+input bool UseTimeFilter = true;  // Filter waktu
+
+// Jam rollover server (Exness GMT+0: jam 0).
+input int RolloverHour = 0;       // Jam rollover
+
+// Tidak entry +/- N menit sekitar rollover.
+input int RolloverBufferMin = 30; // Buffer rollover
+
+// Tidak entry N menit setelah sesi simbol dibuka.
+input int SessionOpenBufferMin = 15; // Buffer buka sesi
+
+// Jumat: tidak entry mulai jam ini. 0 = nonaktif.
+input int FridayStopHour = 20;    // Stop Jumat
+
+// Jam mulai boleh entry.
+input int TradeStartHour = 0;     // Jam mulai
+
+// Jam akhir boleh entry (24 = tengah malam).
+input int TradeEndHour = 24;      // Jam akhir
+
+//---------------- TEKNIS ----------------------------
 input group "=== TEKNIS ==="
-input int    OrderRetrySec     = 30;      // Jeda sebelum mencoba lagi setelah order gagal (detik)
-input int    MaxOrderFailures  = 5;       // Henti EA setelah N kegagalan order beruntun
-input int    NotifyStep        = 3;       // Kirim notifikasi push mulai step ini (0 = off)
-input bool   UsePushNotify     = true;    // Kirim notifikasi push (perlu MetaQuotes ID di terminal)
-input bool   LogToCSV          = true;    // Catat deal & siklus ke file CSV (MQL5\Files)
-input int    HistoryLookbackDays = 30;    // Titik awal baca histori saat pertama dipasang (hari ke belakang)
 
-//+------------------------------------------------------------------+
-//| Variabel global                                                  |
-//+------------------------------------------------------------------+
+// Jeda (detik) sebelum coba lagi setelah order gagal.
+input int OrderRetrySec = 30;     // Jeda retry
+
+// Henti EA setelah N order gagal beruntun.
+input int MaxOrderFailures = 5;   // Maks gagal order
+
+// Kirim notifikasi push mulai step ini. 0 = off.
+input int NotifyStep = 3;         // Notif mulai step
+
+// Kirim push (perlu MetaQuotes ID di terminal).
+input bool UsePushNotify = true;  // Push notif
+
+// Catat deal & siklus ke file CSV (MQL5\Files).
+input bool LogToCSV = true;       // Log CSV
+
+// Saat pertama dipasang, baca histori N hari
+// ke belakang.
+input int HistoryLookbackDays = 30; // Histori (hari)
+
+//====================================================
+// 2. VARIABEL GLOBAL
+//====================================================
+
+// Objek pengirim order.
 CTrade trade;
-double pipsToPoints;   // Ukuran 1 pip dalam harga
-long   slippagePoints;
+
+// Ukuran 1 pip dalam harga, hasil dari PipSize.
+double pipsToPoints;
+
+// Slippage dalam satuan point broker.
+long slippagePoints;
+
+// Handle indikator ADX dan nilai terakhirnya.
 int    adxHandle    = INVALID_HANDLE;
 double lastADXValue = 0;
-bool   needHistoryScan = true;
 
-// UT Bot
-int      utbotAtrHandle    = INVALID_HANDLE;
-double   utbotTS           = 0;   // Garis trailing stop
-int      utbotSignalDir    = 0;   // 1 = BUY, -1 = SELL, 0 = tidak ada
-int      utbotSignalBarsLeft = 0; // Sisa masa berlaku sinyal (bar)
-datetime utbotLastBar      = 0;
-int      utbotTrendDir     = 0;   // Arah trend menurut UT Bot (close vs TS): 1 BUY, -1 SELL
-bool     utbotWarmed       = false; // Warm-up sudah berhasil (data indikator sering belum siap saat OnInit)
+// true = histori perlu dibaca ulang (ada deal baru).
+bool needHistoryScan = true;
 
-// Status EA
+//--- State UT Bot
+int      utbotAtrHandle      = INVALID_HANDLE;
+double   utbotTS             = 0; // garis trailing
+int      utbotSignalDir      = 0; // 1 BUY, -1 SELL
+int      utbotSignalBarsLeft = 0; // sisa bar sinyal
+datetime utbotLastBar        = 0; // bar terakhir diproses
+int      utbotTrendDir       = 0; // trend close vs TS
+bool     utbotWarmed         = false; // warm-up sukses
+
+//--- Status EA
 string eaStatus        = "Inisialisasi...";
-int    nextDirection   = ORDER_TYPE_BUY;
-double nextLot         = 0;
-int    lossStreak      = 0;
-double cumLossSinceWin = 0;   // Akumulasi rugi bersih sejak win terakhir (angka positif)
-bool   waitTrendSignal = true;
-bool   eaHalted        = false;
+int    nextDirection   = ORDER_TYPE_BUY; // arah berikut
+double nextLot         = 0;     // lot berikut
+int    lossStreak      = 0;     // loss beruntun
+double cumLossSinceWin = 0;     // rugi sejak win (positif)
+bool   waitTrendSignal = true;  // entry tunggu sinyal?
+bool   lastWasWin      = false; // trade terakhir WIN
+bool   eaHalted        = false; // EA berhenti permanen
 string haltReason      = "";
-datetime dailyPauseDay = 0;   // Tanggal (awal hari) saat batas rugi harian tercapai
+datetime dailyPauseDay = 0;     // hari pause rugi harian
 
-// Backoff order
+//--- Backoff order gagal
 datetime lastOrderFail  = 0;
 int      orderFailCount = 0;
 
-// Persistensi (global variable terminal)
+//--- Persistensi lewat global variable terminal
 string   gvPrefix;
-double   startBalance = 0;
-datetime historyFrom  = 0;
+double   startBalance = 0; // balance awal sesi
+datetime historyFrom  = 0; // titik awal baca histori
 
-// Statistik
-int    statTotalTrades = 0, statWins = 0, statLosses = 0, statTradesToday = 0;
-double statTotalProfit = 0, statProfitToday = 0;
+//--- Statistik
+int    statTotalTrades = 0;
+int    statWins        = 0;
+int    statLosses      = 0;
+int    statTradesToday = 0;
+double statTotalProfit = 0;
+double statProfitToday = 0;
 string statLastTrade   = "-";
-ulong  lastLoggedDeal  = 0;
+ulong  lastLoggedDeal  = 0; // deal terakhir di-log CSV
 int    prevLossStreak  = 0;
-double cycleMaxLot     = 0;
-double cycleWorstLoss  = 0;
+double cycleMaxLot     = 0; // lot tertinggi siklus ini
+double cycleWorstLoss  = 0; // rugi terdalam siklus ini
 
-// Notifikasi (throttle)
+//--- Throttle notifikasi & log
 datetime lastNotifyTime = 0;
 datetime lastFilterLog  = 0;
 
-//+------------------------------------------------------------------+
-//| Inisialisasi                                                     |
-//+------------------------------------------------------------------+
+//====================================================
+// 3. INIT / DEINIT / TRANSACTION
+//====================================================
+
+//----------------------------------------------------
+// OnInit: dipanggil sekali saat EA dipasang.
+//----------------------------------------------------
 int OnInit()
   {
    trade.SetExpertMagicNumber(MagicNumber);
 
-   // Ukuran pip: eksplisit (disarankan untuk gold) atau deteksi otomatis
-   if(PipSize > 0) pipsToPoints = PipSize;
-   else if(_Digits == 5 || _Digits == 3) pipsToPoints = _Point * 10;
-   else pipsToPoints = _Point;
-   slippagePoints = (long)MathRound(Slippage_Pips * pipsToPoints / _Point);
+   // Tentukan ukuran pip: eksplisit atau otomatis
+   if(PipSize > 0)
+      pipsToPoints = PipSize;
+   else if(_Digits == 5 || _Digits == 3)
+      pipsToPoints = _Point * 10;
+   else
+      pipsToPoints = _Point;
+
+   // Slippage pips -> points broker
+   slippagePoints =
+      (long)MathRound(Slippage_Pips * pipsToPoints / _Point);
    trade.SetDeviationInPoints((ulong)slippagePoints);
-   PrintFormat("Setup %s: 1 pip = %s | TP %d pips = %s | SL %d pips = %s | slippage %d pts",
-               _Symbol, DoubleToString(pipsToPoints, _Digits),
-               TakeProfit_Pips, DoubleToString(TakeProfit_Pips * pipsToPoints, _Digits),
-               StopLoss_Pips, DoubleToString(StopLoss_Pips * pipsToPoints, _Digits), (int)slippagePoints);
-   // Estimasi risiko per unit & eskalasi martingale
+
+   PrintFormat("Setup %s: 1 pip = %s | TP %d pips = %s"
+               + " | SL %d pips = %s | slippage %d pts",
+               _Symbol,
+               DoubleToString(pipsToPoints, _Digits),
+               TakeProfit_Pips,
+               DoubleToString(TakeProfit_Pips * pipsToPoints,
+                              _Digits),
+               StopLoss_Pips,
+               DoubleToString(StopLoss_Pips * pipsToPoints,
+                              _Digits),
+               (int)slippagePoints);
+
+   // Estimasi risiko 1 unit & eskalasi martingale
    double pv = PipValuePerLot();
    if(pv > 0)
      {
       double unit = StopLoss_Pips * pv * InitialLot;
-      PrintFormat("Risiko 1 unit (lot awal kena SL) = %.2f %s | akumulasi rugi: step3 %.2f, step5 %.2f, step6 %.2f",
-                  unit, AccountInfoString(ACCOUNT_CURRENCY), unit*7, unit*31, unit*63);
+      PrintFormat("Risiko 1 unit = %.2f %s | akumulasi:"
+                  + " step3 %.2f, step5 %.2f, step6 %.2f",
+                  unit, AccountInfoString(ACCOUNT_CURRENCY),
+                  unit * 7, unit * 31, unit * 63);
      }
 
-   gvPrefix = "SARM_" + IntegerToString((int)MagicNumber) + "_" + _Symbol + "_";
+   // Prefix nama global variable (unik per magic+simbol)
+   gvPrefix = "SARM_" + IntegerToString((int)MagicNumber)
+              + "_" + _Symbol + "_";
 
-   // Peringatan batas minimal stop broker
-   long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   double minPts = MathMin(TakeProfit_Pips, StopLoss_Pips) * pipsToPoints / _Point;
+   // Peringatan jika SL/TP di bawah stops level broker
+   long stopsLevel =
+      SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minPts = MathMin(TakeProfit_Pips, StopLoss_Pips)
+                   * pipsToPoints / _Point;
    if(stopsLevel > 0 && minPts < stopsLevel)
-      PrintFormat("PERINGATAN: SL/TP (%.0f points) di bawah batas minimal broker (%d points).", minPts, stopsLevel);
+      PrintFormat("PERINGATAN: SL/TP (%.0f pts) di bawah"
+                  + " batas broker (%d pts).",
+                  minPts, stopsLevel);
 
-   // Peringatan swap (posisi 1000 pips hampir pasti melewati rollover)
-   PrintFormat("Info swap %s: long %.2f | short %.2f (per lot per malam, satuan %s)",
-               _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_SWAP_LONG),
+   // Info swap (posisi besar hampir pasti lewat rollover)
+   PrintFormat("Swap %s: long %.2f | short %.2f (%s)",
+               _Symbol,
+               SymbolInfoDouble(_Symbol, SYMBOL_SWAP_LONG),
                SymbolInfoDouble(_Symbol, SYMBOL_SWAP_SHORT),
-               EnumToString((ENUM_SYMBOL_SWAP_MODE)SymbolInfoInteger(_Symbol, SYMBOL_SWAP_MODE)));
+               EnumToString((ENUM_SYMBOL_SWAP_MODE)
+                  SymbolInfoInteger(_Symbol,
+                                    SYMBOL_SWAP_MODE)));
 
-   // Handle indikator
+   // Buat handle indikator
    if(UseADXFilter)
      {
       adxHandle = iADX(_Symbol, ADX_Timeframe, ADX_Period);
-      if(adxHandle == INVALID_HANDLE) { Print("Gagal membuat handle ADX: ", GetLastError()); return(INIT_FAILED); }
+      if(adxHandle == INVALID_HANDLE)
+        {
+         Print("Gagal handle ADX: ", GetLastError());
+         return(INIT_FAILED);
+        }
      }
    if(UseUTBotSignal)
      {
-      utbotAtrHandle = iATR(_Symbol, UTBot_Timeframe, UTBot_ATR_Period);
-      if(utbotAtrHandle == INVALID_HANDLE) { Print("Gagal membuat handle ATR: ", GetLastError()); return(INIT_FAILED); }
+      utbotAtrHandle = iATR(_Symbol, UTBot_Timeframe,
+                            UTBot_ATR_Period);
+      if(utbotAtrHandle == INVALID_HANDLE)
+        {
+         Print("Gagal handle ATR: ", GetLastError());
+         return(INIT_FAILED);
+        }
      }
 
-   // Persistensi balance awal sesi & titik awal histori
+   // Reset sesi jika diminta
    if(ResetSession)
      {
       GlobalVariableDel(gvPrefix + "StartBalance");
       GlobalVariableDel(gvPrefix + "HistoryFrom");
-      Print("Sesi di-reset: balance awal & titik histori dihapus.");
+      Print("Sesi di-reset.");
      }
+
+   // Balance awal sesi (persisten)
    if(GlobalVariableCheck(gvPrefix + "StartBalance"))
-      startBalance = GlobalVariableGet(gvPrefix + "StartBalance");
+      startBalance =
+         GlobalVariableGet(gvPrefix + "StartBalance");
    else
      {
       startBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-      GlobalVariableSet(gvPrefix + "StartBalance", startBalance);
-     }
-   if(GlobalVariableCheck(gvPrefix + "HistoryFrom"))
-      historyFrom = (datetime)GlobalVariableGet(gvPrefix + "HistoryFrom");
-   else
-     {
-      historyFrom = TimeCurrent() - (datetime)(HistoryLookbackDays * 86400);
-      GlobalVariableSet(gvPrefix + "HistoryFrom", (double)historyFrom);
+      GlobalVariableSet(gvPrefix + "StartBalance",
+                        startBalance);
      }
 
-   // Warm-up UT Bot agar tidak mulai dari TS = 0
+   // Titik awal histori (persisten)
+   if(GlobalVariableCheck(gvPrefix + "HistoryFrom"))
+      historyFrom =
+         (datetime)GlobalVariableGet(gvPrefix
+                                     + "HistoryFrom");
+   else
+     {
+      historyFrom = TimeCurrent()
+                    - (datetime)(HistoryLookbackDays * 86400);
+      GlobalVariableSet(gvPrefix + "HistoryFrom",
+                        (double)historyFrom);
+     }
+
+   // Warm-up UT Bot agar TS tidak mulai dari 0
    if(UseUTBotSignal)
       WarmupUTBot();
 
@@ -213,15 +404,22 @@ int OnInit()
    return(INIT_SUCCEEDED);
   }
 
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// OnDeinit: lepas handle & bersihkan panel.
+//----------------------------------------------------
 void OnDeinit(const int reason)
   {
-   if(adxHandle != INVALID_HANDLE)      IndicatorRelease(adxHandle);
-   if(utbotAtrHandle != INVALID_HANDLE) IndicatorRelease(utbotAtrHandle);
+   if(adxHandle != INVALID_HANDLE)
+      IndicatorRelease(adxHandle);
+   if(utbotAtrHandle != INVALID_HANDLE)
+      IndicatorRelease(utbotAtrHandle);
    Comment("");
   }
 
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// OnTradeTransaction: tandai histori perlu dibaca
+// ulang setiap ada deal baru.
+//----------------------------------------------------
 void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
@@ -230,59 +428,80 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       needHistoryScan = true;
   }
 
-//+------------------------------------------------------------------+
-//| Tick utama                                                       |
-//+------------------------------------------------------------------+
+//====================================================
+// 4. ONTICK - ALUR UTAMA
+//====================================================
 void OnTick()
   {
+   // Perbarui sinyal UT Bot (per bar baru)
    UpdateUTBotSignal();
 
-   // 1. EA dihentikan permanen (equity stop / order gagal beruntun) -> hanya tampil status
+   //--- 1. EA dihentikan permanen: hanya tampil status
    if(eaHalted)
      {
-      eaStatus = "HENTI: " + haltReason + " (lepas & pasang ulang EA untuk lanjut)";
+      eaStatus = "HENTI: " + haltReason
+                 + " (pasang ulang EA untuk lanjut)";
       UpdateChartComment();
       return;
      }
 
-   // 2. Scan histori hanya saat ada deal baru
+   //--- 2. Baca histori hanya saat ada deal baru
    if(needHistoryScan)
      {
       nextDirection   = ORDER_TYPE_BUY;
       nextLot         = InitialLot;
       lossStreak      = 0;
       cumLossSinceWin = 0;
-      GetLastTradeInfo(nextDirection, nextLot, lossStreak, cumLossSinceWin);
+      bool hasHistory = GetLastTradeInfo(nextDirection,
+                                         nextLot,
+                                         lossStreak,
+                                         cumLossSinceWin);
       UpdateTradeStats();
 
-      // Mode recovery riil: hitung lot dari kerugian yang harus dipulihkan + target
+      // Mode recovery riil: lot dari rugi + target
       if(UseLossBasedRecovery && lossStreak > 0)
          nextLot = CalcRecoveryLot(cumLossSinceWin);
 
-      waitTrendSignal = (lossStreak == 0);
-      if(MaxMartingaleStep > 0 && lossStreak >= MaxMartingaleStep)
+      // Trade terakhir WIN -> entry langsung tanpa sinyal
+      lastWasWin = (hasHistory && lossStreak == 0);
+      bool skipSignal = EntryAfterWinNoSignal && lastWasWin;
+      waitTrendSignal = (lossStreak == 0) && !skipSignal;
+      if(EntryAfterWinNoSignal && lastWasWin)
+         PrintFormat("Trade terakhir WIN: entry langsung"
+                     + " %s %.2f lot tanpa sinyal.",
+                     nextDirection == ORDER_TYPE_BUY
+                        ? "BUY" : "SELL",
+                     nextLot);
+
+      // Batas step martingale -> tunggu sinyal
+      if(MaxMartingaleStep > 0
+         && lossStreak >= MaxMartingaleStep)
         {
-         PrintFormat("Batas martingale %d step tercapai (loss beruntun %d). Entry lot %.2f menunggu sinyal.",
+         PrintFormat("Batas %d step tercapai (loss %d)."
+                     + " Lot %.2f menunggu sinyal.",
                      MaxMartingaleStep, lossStreak, nextLot);
          waitTrendSignal = true;
         }
 
-      // Notifikasi step tinggi
-      if(NotifyStep > 0 && lossStreak >= NotifyStep && lossStreak != prevLossStreak)
-         Notify(StringFormat("%s: step martingale %d, rugi akumulasi %.2f, lot berikut %.2f",
-                             _Symbol, lossStreak, cumLossSinceWin, nextLot));
-      prevLossStreak = lossStreak;
+      // Notifikasi step tinggi (sekali per step)
+      if(NotifyStep > 0 && lossStreak >= NotifyStep
+         && lossStreak != prevLossStreak)
+         Notify(StringFormat("%s: step %d, rugi %.2f,"
+                             + " lot berikut %.2f",
+                             _Symbol, lossStreak,
+                             cumLossSinceWin, nextLot));
+      prevLossStreak  = lossStreak;
       needHistoryScan = false;
      }
 
-   // 3. Cek risiko akun (equity stop & batas rugi harian)
+   //--- 3. Cek risiko akun
    if(!RiskChecks())
      {
       UpdateChartComment();
       return;
      }
 
-   // 4. Posisi masih terbuka: kelola umur posisi, lalu tunggu
+   //--- 4. Ada posisi: kelola umur, lalu tunggu
    if(CountOpenPositions() > 0)
      {
       ManageOpenPosition();
@@ -291,11 +510,15 @@ void OnTick()
       return;
      }
 
-   // 5. Backoff setelah order gagal
-   if(lastOrderFail > 0 && TimeCurrent() - lastOrderFail < OrderRetrySec)
+   //--- 5. Backoff setelah order gagal
+   if(lastOrderFail > 0
+      && TimeCurrent() - lastOrderFail < OrderRetrySec)
      {
-      eaStatus = StringFormat("Jeda %d dtk setelah order gagal (%d/%d)",
-                              OrderRetrySec - (int)(TimeCurrent() - lastOrderFail), orderFailCount, MaxOrderFailures);
+      int sisa = OrderRetrySec
+                 - (int)(TimeCurrent() - lastOrderFail);
+      eaStatus = StringFormat("Jeda %d dtk (%d/%d gagal)",
+                              sisa, orderFailCount,
+                              MaxOrderFailures);
       UpdateChartComment();
       return;
      }
@@ -305,116 +528,173 @@ void OnTick()
    bool canLog = (TimeCurrent() - lastFilterLog >= 60);
    string why = "";
 
-   // 6. Filter kondisi pasar/akun
-   if(SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE) != SYMBOL_TRADE_MODE_FULL)
-     { Hold("pasar tutup / trading simbol dibatasi", canLog); return; }
+   //--- 6. Filter kondisi pasar & akun
+   if(SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE)
+      != SYMBOL_TRADE_MODE_FULL)
+     {
+      Hold("pasar tutup / simbol dibatasi", canLog);
+      return;
+     }
 
    if(IsNettingAccount() && ForeignPositionOnSymbol())
-     { Hold("akun netting: ada posisi lain di simbol ini (manual/EA lain)", canLog); return; }
+     {
+      Hold("akun netting: ada posisi lain", canLog);
+      return;
+     }
 
    double spreadPips = (ask - bid) / pipsToPoints;
    if(MaxSpread_Pips > 0 && spreadPips > MaxSpread_Pips)
-     { Hold(StringFormat("spread %.1f pips > batas %.1f pips", spreadPips, MaxSpread_Pips), canLog); return; }
+     {
+      Hold(StringFormat("spread %.1f > %.1f pips",
+                        spreadPips, MaxSpread_Pips), canLog);
+      return;
+     }
 
    if(UseTimeFilter && TimeFilterBlocks(why))
-     { Hold("filter waktu: " + why, canLog); return; }
+     {
+      Hold("filter waktu: " + why, canLog);
+      return;
+     }
 
-   // 7. Logika sinyal
+   //--- 7. Logika sinyal
    if(waitTrendSignal)
      {
+      // Entry awal / setelah batas step: butuh sinyal
       if(UseUTBotSignal)
         {
          if(utbotSignalDir == 0)
            {
-            eaStatus = StringFormat("MENUNGGU sinyal UT Bot (TS %s)", DoubleToString(utbotTS, _Digits));
+            eaStatus = StringFormat("MENUNGGU sinyal (TS %s)",
+                          DoubleToString(utbotTS, _Digits));
             UpdateChartComment();
             return;
            }
-         nextDirection = (utbotSignalDir > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+         nextDirection = (utbotSignalDir > 0)
+                         ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
         }
       if(UseADXFilter && !IsTrending())
-        { Hold(StringFormat("sideway (ADX %.1f < %.1f)", lastADXValue, ADX_Threshold), canLog); return; }
+        {
+         Hold(StringFormat("sideway (ADX %.1f < %.1f)",
+                           lastADXValue, ADX_Threshold),
+              canLog);
+         return;
+        }
      }
-   else if(UseUTBotSignal && CheckSwitchConflict)
+   else if(lossStreak > 0 && UseUTBotSignal
+           && CheckSwitchConflict)
      {
-      // Entry lanjutan martingale: jika SL kena karena spike tapi trend UT Bot
-      // belum berbalik, switching justru salah arah -> tunda sampai trend sejalan
-      // atau muncul sinyal baru (sinyal baru menentukan arah).
+      // Entry lanjutan martingale: jika SL kena karena
+      // spike tapi trend UT Bot belum berbalik, tunda
+      // switching sampai trend sejalan atau ada sinyal
+      // baru (sinyal baru menentukan arah).
       if(utbotSignalDir != 0)
-         nextDirection = (utbotSignalDir > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+         nextDirection = (utbotSignalDir > 0)
+                         ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
       else
         {
-         int switchDir = (nextDirection == ORDER_TYPE_BUY) ? 1 : -1;
+         int switchDir = (nextDirection == ORDER_TYPE_BUY)
+                         ? 1 : -1;
          if(utbotTrendDir != 0 && utbotTrendDir != switchDir)
            {
-            Hold(StringFormat("switching ke %s ditunda, trend UT Bot masih %s",
-                              switchDir > 0 ? "BUY" : "SELL", utbotTrendDir > 0 ? "BUY" : "SELL"), canLog);
+            string sw = switchDir > 0 ? "BUY" : "SELL";
+            string tr = utbotTrendDir > 0 ? "BUY" : "SELL";
+            Hold(StringFormat("switch %s ditunda, trend %s",
+                              sw, tr), canLog);
             return;
            }
         }
      }
+   // else: trade terakhir WIN -> langsung entry searah
 
-   // 8. Kalkulasi lot + validasi broker
+   //--- 8. Kalkulasi lot + validasi broker
    double lot = NormalizeLot(nextLot);
-   double volLimit = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_LIMIT);
+   double volLimit =
+      SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_LIMIT);
    if(volLimit > 0 && lot > volLimit)
      {
-      PrintFormat("Lot %.2f melebihi SYMBOL_VOLUME_LIMIT %.2f, dipotong.", lot, volLimit);
+      PrintFormat("Lot %.2f > volume limit %.2f, dipotong.",
+                  lot, volLimit);
       lot = volLimit;
      }
 
-   double price = (nextDirection == ORDER_TYPE_BUY) ? ask : bid;
+   double price = (nextDirection == ORDER_TYPE_BUY)
+                  ? ask : bid;
    double marginNeed = 0;
-   if(!OrderCalcMargin((ENUM_ORDER_TYPE)nextDirection, _Symbol, lot, price, marginNeed))
-     { Hold("gagal hitung margin: " + IntegerToString(GetLastError()), canLog); return; }
-   if(marginNeed > AccountInfoDouble(ACCOUNT_MARGIN_FREE))
+   if(!OrderCalcMargin((ENUM_ORDER_TYPE)nextDirection,
+                       _Symbol, lot, price, marginNeed))
      {
-      Hold(StringFormat("margin tidak cukup (butuh %.2f, free %.2f)", marginNeed, AccountInfoDouble(ACCOUNT_MARGIN_FREE)), canLog);
-      if(canLog) Notify(StringFormat("%s: margin tidak cukup untuk lot %.2f (butuh %.2f)", _Symbol, lot, marginNeed));
+      Hold("gagal hitung margin: "
+           + IntegerToString(GetLastError()), canLog);
+      return;
+     }
+   double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   if(marginNeed > freeMargin)
+     {
+      Hold(StringFormat("margin kurang (butuh %.2f,"
+                        + " free %.2f)",
+                        marginNeed, freeMargin), canLog);
+      if(canLog)
+         Notify(StringFormat("%s: margin kurang lot %.2f",
+                             _Symbol, lot));
       return;
      }
 
-   // 9. Eksekusi
+   //--- 9. Eksekusi order
+   double slDist = StopLoss_Pips * pipsToPoints;
+   double tpDist = TakeProfit_Pips * pipsToPoints;
    double sl = 0, tp = 0;
    bool sent = false;
    if(nextDirection == ORDER_TYPE_BUY)
      {
-      sl = NormalizeDouble(ask - StopLoss_Pips * pipsToPoints, _Digits);
-      tp = NormalizeDouble(ask + TakeProfit_Pips * pipsToPoints, _Digits);
-      sent = trade.Buy(lot, _Symbol, ask, sl, tp, "SAR Martingale Buy");
+      sl = NormalizeDouble(ask - slDist, _Digits);
+      tp = NormalizeDouble(ask + tpDist, _Digits);
+      sent = trade.Buy(lot, _Symbol, ask, sl, tp,
+                       "SAR Martingale Buy");
      }
    else
      {
-      sl = NormalizeDouble(bid + StopLoss_Pips * pipsToPoints, _Digits);
-      tp = NormalizeDouble(bid - TakeProfit_Pips * pipsToPoints, _Digits);
-      sent = trade.Sell(lot, _Symbol, bid, sl, tp, "SAR Martingale Sell");
+      sl = NormalizeDouble(bid + slDist, _Digits);
+      tp = NormalizeDouble(bid - tpDist, _Digits);
+      sent = trade.Sell(lot, _Symbol, bid, sl, tp,
+                        "SAR Martingale Sell");
      }
 
    if(!sent || trade.ResultRetcode() != TRADE_RETCODE_DONE)
      {
+      // Order gagal: catat, backoff, halt jika beruntun
       lastOrderFail = TimeCurrent();
       orderFailCount++;
-      PrintFormat("Order gagal (%d/%d): retcode=%d (%s), lot=%.2f",
-                  orderFailCount, MaxOrderFailures, trade.ResultRetcode(), trade.ResultRetcodeDescription(), lot);
-      eaStatus = StringFormat("ORDER GAGAL: %s (retcode %d)", trade.ResultRetcodeDescription(), trade.ResultRetcode());
-      if(MaxOrderFailures > 0 && orderFailCount >= MaxOrderFailures)
-         HaltEA(StringFormat("%d order gagal beruntun (%s)", orderFailCount, trade.ResultRetcodeDescription()));
+      uint   rc  = trade.ResultRetcode();
+      string rcs = trade.ResultRetcodeDescription();
+      PrintFormat("Order gagal (%d/%d): %d (%s), lot %.2f",
+                  orderFailCount, MaxOrderFailures,
+                  rc, rcs, lot);
+      eaStatus = StringFormat("ORDER GAGAL: %s (%d)", rcs, rc);
+      if(MaxOrderFailures > 0
+         && orderFailCount >= MaxOrderFailures)
+         HaltEA(StringFormat("%d order gagal beruntun (%s)",
+                             orderFailCount, rcs));
      }
    else
      {
+      // Order sukses: reset backoff, sinyal terpakai
       eaStatus = "Order terkirim";
-      orderFailCount  = 0;
-      lastOrderFail   = 0;
-      utbotSignalDir  = 0;   // sinyal terpakai
+      orderFailCount      = 0;
+      lastOrderFail       = 0;
+      utbotSignalDir      = 0;
       utbotSignalBarsLeft = 0;
       if(lot > cycleMaxLot) cycleMaxLot = lot;
      }
    UpdateChartComment();
   }
 
-//+------------------------------------------------------------------+
-//| Helper status "ditahan" + log terbatas 1x/menit                  |
-//+------------------------------------------------------------------+
+//====================================================
+// 5. HELPER: HOLD, HALT, RISIKO, POSISI
+//====================================================
+
+//----------------------------------------------------
+// Hold: set status "ditahan" + log maks 1x/menit.
+//----------------------------------------------------
 void Hold(string reason, bool canLog)
   {
    if(canLog)
@@ -426,9 +706,9 @@ void Hold(string reason, bool canLog)
    UpdateChartComment();
   }
 
-//+------------------------------------------------------------------+
-//| Henti EA permanen (sampai dipasang ulang)                         |
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// HaltEA: henti permanen sampai EA dipasang ulang.
+//----------------------------------------------------
 void HaltEA(string reason)
   {
    eaHalted   = true;
@@ -438,9 +718,10 @@ void HaltEA(string reason)
    LogCSV("HALT", 0, 0, 0, reason);
   }
 
-//+------------------------------------------------------------------+
-//| Cek risiko akun: equity stop & batas rugi harian                  |
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// RiskChecks: equity stop & batas rugi harian.
+// Return false jika EA tidak boleh entry.
+//----------------------------------------------------
 bool RiskChecks()
   {
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -448,11 +729,13 @@ bool RiskChecks()
    // Equity stop terhadap balance awal sesi
    if(MaxDrawdownPct > 0 && startBalance > 0)
      {
-      double floor = startBalance * (1.0 - MaxDrawdownPct / 100.0);
+      double floor = startBalance
+                     * (1.0 - MaxDrawdownPct / 100.0);
       if(equity <= floor)
         {
          if(CloseOnEquityStop) CloseAllOwnPositions();
-         HaltEA(StringFormat("equity %.2f <= batas %.2f (drawdown %.1f%%)", equity, floor, MaxDrawdownPct));
+         HaltEA(StringFormat("equity %.2f <= %.2f (DD %.1f%%)"
+                             , equity, floor, MaxDrawdownPct));
          eaStatus = "HENTI: " + haltReason;
          return false;
         }
@@ -461,18 +744,23 @@ bool RiskChecks()
    // Batas rugi harian (realized hari ini + floating)
    if(DailyLossLimit > 0)
      {
-      datetime todayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+      datetime todayStart =
+         StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
       if(dailyPauseDay == todayStart)
         {
-         eaStatus = StringFormat("PAUSE HARIAN: rugi hari ini mencapai batas %.2f", DailyLossLimit);
+         eaStatus = StringFormat("PAUSE HARIAN: batas %.2f",
+                                 DailyLossLimit);
          return false;
         }
       double floating = OwnFloatingProfit();
       if(statProfitToday + floating <= -DailyLossLimit)
         {
          dailyPauseDay = todayStart;
-         PrintFormat("Batas rugi harian tercapai: realized %.2f + floating %.2f. Tidak entry sampai besok.", statProfitToday, floating);
-         Notify(StringFormat("%s: batas rugi harian %.2f tercapai", _Symbol, DailyLossLimit));
+         PrintFormat("Batas rugi harian: realized %.2f"
+                     + " + floating %.2f. Pause.",
+                     statProfitToday, floating);
+         Notify(StringFormat("%s: batas rugi harian %.2f",
+                             _Symbol, DailyLossLimit));
          eaStatus = "PAUSE HARIAN: batas rugi tercapai";
          return false;
         }
@@ -480,9 +768,9 @@ bool RiskChecks()
    return true;
   }
 
-//+------------------------------------------------------------------+
-//| Kelola posisi terbuka: batas umur posisi                          |
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// ManageOpenPosition: tutup posisi yang terlalu tua.
+//----------------------------------------------------
 void ManageOpenPosition()
   {
    if(MaxPositionDays <= 0) return;
@@ -490,30 +778,48 @@ void ManageOpenPosition()
      {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol || PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-      datetime opened = (datetime)PositionGetInteger(POSITION_TIME);
+      if(!IsOwnPosition()) continue;
+      datetime opened =
+         (datetime)PositionGetInteger(POSITION_TIME);
       if(TimeCurrent() - opened >= MaxPositionDays * 86400)
         {
-         PrintFormat("Posisi #%I64u berumur > %d hari, ditutup (hasil dihitung dari profit bersih).", ticket, MaxPositionDays);
+         PrintFormat("Posisi #%I64u > %d hari, ditutup.",
+                     ticket, MaxPositionDays);
          if(!trade.PositionClose(ticket))
-            PrintFormat("Gagal tutup posisi #%I64u: %s", ticket, trade.ResultRetcodeDescription());
+            PrintFormat("Gagal tutup #%I64u: %s", ticket,
+                        trade.ResultRetcodeDescription());
         }
      }
   }
 
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// IsOwnPosition: posisi yang sedang dipilih milik EA?
+// (panggil setelah PositionGetTicket)
+//----------------------------------------------------
+bool IsOwnPosition()
+  {
+   if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+      return false;
+   return PositionGetInteger(POSITION_MAGIC) == MagicNumber;
+  }
+
+//----------------------------------------------------
+// CloseAllOwnPositions: tutup semua posisi EA ini.
+//----------------------------------------------------
 void CloseAllOwnPositions()
   {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+      if(IsOwnPosition())
          trade.PositionClose(ticket);
      }
   }
 
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// OwnFloatingProfit: total floating P/L posisi EA.
+//----------------------------------------------------
 double OwnFloatingProfit()
   {
    double p = 0;
@@ -521,66 +827,114 @@ double OwnFloatingProfit()
      {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
-         p += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      if(IsOwnPosition())
+         p += PositionGetDouble(POSITION_PROFIT)
+              + PositionGetDouble(POSITION_SWAP);
      }
    return p;
   }
 
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// CountOpenPositions: jumlah posisi milik EA ini.
+//----------------------------------------------------
+int CountOpenPositions()
+  {
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(IsOwnPosition()) count++;
+     }
+   return count;
+  }
+
+//----------------------------------------------------
+// IsNettingAccount: akun netting (1 posisi/simbol)?
+//----------------------------------------------------
 bool IsNettingAccount()
   {
    long mode = AccountInfoInteger(ACCOUNT_MARGIN_MODE);
-   return (mode == ACCOUNT_MARGIN_MODE_RETAIL_NETTING || mode == ACCOUNT_MARGIN_MODE_EXCHANGE);
+   return (mode == ACCOUNT_MARGIN_MODE_RETAIL_NETTING
+           || mode == ACCOUNT_MARGIN_MODE_EXCHANGE);
   }
 
+//----------------------------------------------------
+// ForeignPositionOnSymbol: ada posisi lain (manual /
+// EA lain) di simbol ini?
+//----------------------------------------------------
 bool ForeignPositionOnSymbol()
   {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol
+         && PositionGetInteger(POSITION_MAGIC) != MagicNumber)
          return true;
      }
    return false;
   }
 
-//+------------------------------------------------------------------+
-//| Filter waktu (server): rollover, Jumat sore, jam trading          |
-//+------------------------------------------------------------------+
+//====================================================
+// 6. FILTER WAKTU & SESI
+//====================================================
+
+//----------------------------------------------------
+// TimeFilterBlocks: true jika waktu sekarang dilarang
+// entry. Alasan dikembalikan lewat 'why'.
+//----------------------------------------------------
 bool TimeFilterBlocks(string &why)
   {
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
    int minuteOfDay = dt.hour * 60 + dt.min;
 
-   // Jarak ke rollover (menghitung lintas tengah malam)
+   // Jarak ke rollover (lintas tengah malam)
    int rolloverMin = RolloverHour * 60;
    int diff = MathAbs(minuteOfDay - rolloverMin);
    diff = MathMin(diff, 1440 - diff);
    if(RolloverBufferMin > 0 && diff <= RolloverBufferMin)
-     { why = StringFormat("rollover +/-%d mnt", RolloverBufferMin); return true; }
+     {
+      why = StringFormat("rollover +/-%d mnt",
+                         RolloverBufferMin);
+      return true;
+     }
 
-   if(FridayStopHour > 0 && dt.day_of_week == 5 && dt.hour >= FridayStopHour)
-     { why = StringFormat("Jumat >= %02d:00", FridayStopHour); return true; }
+   // Jumat sore
+   if(FridayStopHour > 0 && dt.day_of_week == 5
+      && dt.hour >= FridayStopHour)
+     {
+      why = StringFormat("Jumat >= %02d:00", FridayStopHour);
+      return true;
+     }
 
+   // Akhir pekan
    if(dt.day_of_week == 0 || dt.day_of_week == 6)
-     { why = "akhir pekan"; return true; }
+     {
+      why = "akhir pekan";
+      return true;
+     }
 
-   // Sesi trading simbol (Exness gold ada jeda harian; SYMBOL_TRADE_MODE tidak menangkap ini)
+   // Sesi trading simbol (gold ada jeda harian)
    if(!InTradeSession(why))
       return true;
 
+   // Jam trading user
    if(dt.hour < TradeStartHour || dt.hour >= TradeEndHour)
-     { why = StringFormat("di luar jam %02d-%02d", TradeStartHour, TradeEndHour); return true; }
+     {
+      why = StringFormat("di luar jam %02d-%02d",
+                         TradeStartHour, TradeEndHour);
+      return true;
+     }
 
    return false;
   }
 
-//+------------------------------------------------------------------+
-//| Cek sesi trading simbol hari ini (+ buffer setelah sesi dibuka)   |
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// InTradeSession: sekarang di dalam sesi trading
+// simbol? Plus buffer setelah sesi dibuka.
+//----------------------------------------------------
 bool InTradeSession(string &why)
   {
    MqlDateTime dt;
@@ -590,36 +944,52 @@ bool InTradeSession(string &why)
    int sessions = 0;
    for(int i = 0; i < 10; i++)
      {
-      if(!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dt.day_of_week, i, from, to))
+      if(!SymbolInfoSessionTrade(_Symbol,
+            (ENUM_DAY_OF_WEEK)dt.day_of_week, i, from, to))
          break;
       sessions++;
       long f = (long)from, t = (long)to;
       if(secOfDay >= f && secOfDay < t)
         {
-         if(SessionOpenBufferMin > 0 && secOfDay - f < SessionOpenBufferMin * 60)
-           { why = StringFormat("%d mnt pertama setelah sesi buka", SessionOpenBufferMin); return false; }
+         if(SessionOpenBufferMin > 0
+            && secOfDay - f < SessionOpenBufferMin * 60)
+           {
+            why = StringFormat("%d mnt pertama sesi",
+                               SessionOpenBufferMin);
+            return false;
+           }
          return true;
         }
      }
-   if(sessions == 0) return true; // broker tidak memberi info sesi: anggap buka
-   why = "di luar sesi trading simbol";
+   // Broker tidak memberi info sesi: anggap buka
+   if(sessions == 0) return true;
+   why = "di luar sesi simbol";
    return false;
   }
 
-//+------------------------------------------------------------------+
-//| UT Bot: satu langkah kalkulasi trailing stop, mengembalikan sinyal|
-//+------------------------------------------------------------------+
+//====================================================
+// 7. UT BOT
+//====================================================
+
+//----------------------------------------------------
+// UTBotStep: satu langkah perhitungan trailing stop.
+// Return 1 = sinyal BUY, -1 = SELL, 0 = tidak ada.
+//----------------------------------------------------
 int UTBotStep(double src, double src_prev, double atr)
   {
    double nLoss = UTBot_KeyValue * atr;
    double ts;
-   if(src > utbotTS && src_prev > utbotTS)      ts = MathMax(utbotTS, src - nLoss);
-   else if(src < utbotTS && src_prev < utbotTS) ts = MathMin(utbotTS, src + nLoss);
-   else if(src > utbotTS)                       ts = src - nLoss;
-   else                                         ts = src + nLoss;
+   if(src > utbotTS && src_prev > utbotTS)
+      ts = MathMax(utbotTS, src - nLoss);   // trend naik
+   else if(src < utbotTS && src_prev < utbotTS)
+      ts = MathMin(utbotTS, src + nLoss);   // trend turun
+   else if(src > utbotTS)
+      ts = src - nLoss;                     // balik ke atas
+   else
+      ts = src + nLoss;                     // balik ke bawah
 
    int sig = 0;
-   if(utbotTS > 0) // abaikan sinyal dari kondisi awal TS = 0
+   if(utbotTS > 0) // abaikan sinyal dari TS awal = 0
      {
       if(src > ts && src_prev <= utbotTS) sig = 1;
       if(src < ts && src_prev >= utbotTS) sig = -1;
@@ -629,57 +999,67 @@ int UTBotStep(double src, double src_prev, double atr)
    return sig;
   }
 
-//+------------------------------------------------------------------+
-//| Warm-up: hitung ulang trailing dari N bar terakhir saat init      |
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// WarmupUTBot: hitung ulang TS dari N bar terakhir
+// saat EA dipasang, agar state sama seperti indikator.
+//----------------------------------------------------
 void WarmupUTBot()
   {
    double atrBuf[], closes[];
    ArraySetAsSeries(atrBuf, true);
    ArraySetAsSeries(closes, true);
-   int nAtr = CopyBuffer(utbotAtrHandle, 0, 1, WarmupBars, atrBuf);
-   int nCls = CopyClose(_Symbol, UTBot_Timeframe, 1, WarmupBars + 1, closes);
+   int nAtr = CopyBuffer(utbotAtrHandle, 0, 1,
+                         WarmupBars, atrBuf);
+   int nCls = CopyClose(_Symbol, UTBot_Timeframe, 1,
+                        WarmupBars + 1, closes);
    if(nAtr < 2 || nCls < 3)
      {
-      Print("Warm-up UT Bot: data belum siap, akan dicoba lagi di tick berikutnya.");
+      Print("Warm-up UT Bot: data belum siap, coba lagi.");
       return;
      }
    utbotWarmed = true;
    int n = MathMin(nAtr, nCls - 1);
    utbotTS = 0;
    int lastSig = 0;
-   for(int i = n - 1; i >= 0; i--)          // dari bar tertua ke bar 1
-      lastSig = UTBotStep(closes[i], closes[i + 1], atrBuf[i]);
+   // Dari bar tertua ke bar 1
+   for(int i = n - 1; i >= 0; i--)
+      lastSig = UTBotStep(closes[i], closes[i + 1],
+                          atrBuf[i]);
 
    utbotLastBar = iTime(_Symbol, UTBot_Timeframe, 0);
    if(lastSig != 0)
      {
-      utbotSignalDir = lastSig;
+      utbotSignalDir      = lastSig;
       utbotSignalBarsLeft = SignalValidBars;
      }
-   PrintFormat("Warm-up UT Bot selesai (%d bar): TS=%s, trend=%s, sinyal=%d",
-               n, DoubleToString(utbotTS, _Digits), utbotTrendDir > 0 ? "BUY" : "SELL", lastSig);
+   PrintFormat("Warm-up UT Bot (%d bar): TS=%s, trend=%s,"
+               + " sinyal=%d",
+               n, DoubleToString(utbotTS, _Digits),
+               utbotTrendDir > 0 ? "BUY" : "SELL", lastSig);
   }
 
-//+------------------------------------------------------------------+
-//| UT Bot: evaluasi per bar baru + masa berlaku sinyal               |
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// UpdateUTBotSignal: evaluasi tiap bar baru dan
+// kelola masa berlaku sinyal.
+//----------------------------------------------------
 void UpdateUTBotSignal()
   {
    if(!UseUTBotSignal) return;
 
-   // Ulangi warm-up jika saat OnInit data indikator belum tersedia
+   // Ulangi warm-up jika saat OnInit data belum siap
    if(!utbotWarmed)
      {
       WarmupUTBot();
       if(utbotWarmed) return;
      }
 
+   // Hanya proses saat bar baru
    datetime curBar = iTime(_Symbol, UTBot_Timeframe, 0);
    if(curBar == 0 || curBar == utbotLastBar) return;
 
    double atrBuf[1];
-   if(CopyBuffer(utbotAtrHandle, 0, 1, 1, atrBuf) < 1) return;
+   if(CopyBuffer(utbotAtrHandle, 0, 1, 1, atrBuf) < 1)
+      return;
 
    double src      = iClose(_Symbol, UTBot_Timeframe, 1);
    double src_prev = iClose(_Symbol, UTBot_Timeframe, 2);
@@ -687,60 +1067,79 @@ void UpdateUTBotSignal()
 
    if(sig != 0)
      {
-      utbotSignalDir = sig;
+      // Sinyal baru
+      utbotSignalDir      = sig;
       utbotSignalBarsLeft = SignalValidBars;
-      PrintFormat("Sinyal UT Bot: %s (close %s, TS %s)", sig > 0 ? "BUY" : "SELL",
-                  DoubleToString(src, _Digits), DoubleToString(utbotTS, _Digits));
+      PrintFormat("Sinyal UT Bot: %s (close %s, TS %s)",
+                  sig > 0 ? "BUY" : "SELL",
+                  DoubleToString(src, _Digits),
+                  DoubleToString(utbotTS, _Digits));
      }
    else if(utbotSignalDir != 0)
      {
-      // Masa berlaku berkurang hanya saat tidak ada posisi (sinyal "antre" saat posisi terbuka)
+      // Masa berlaku berkurang hanya saat tidak ada
+      // posisi (sinyal "antre" saat posisi terbuka)
       if(CountOpenPositions() == 0)
         {
          utbotSignalBarsLeft--;
          if(utbotSignalBarsLeft <= 0)
            {
-            Print("Sinyal UT Bot hangus (masa berlaku habis).");
+            Print("Sinyal UT Bot hangus.");
             utbotSignalDir = 0;
            }
         }
-      // Sinyal yang berlawanan dengan trend sekarang tidak valid lagi
-      else if(utbotTrendDir != 0 && utbotTrendDir != utbotSignalDir)
+      // Sinyal berlawanan trend sekarang -> batal
+      else if(utbotTrendDir != 0
+              && utbotTrendDir != utbotSignalDir)
          utbotSignalDir = 0;
      }
    utbotLastBar = curBar;
   }
 
-//+------------------------------------------------------------------+
-//| Lot recovery berbasis kerugian riil                               |
-//+------------------------------------------------------------------+
+//====================================================
+// 8. LOT RECOVERY, STATISTIK, LOG, NOTIFIKASI
+//====================================================
+
+//----------------------------------------------------
+// PipValuePerLot: nilai 1 pip untuk 1 lot (uang).
+//----------------------------------------------------
 double PipValuePerLot()
   {
-   double tickVal  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickVal =
+      SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize =
+      SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    if(tickSize <= 0) return 0;
    return tickVal / tickSize * pipsToPoints;
   }
 
+//----------------------------------------------------
+// CalcRecoveryLot: lot agar TP menutup rugi + target.
+//----------------------------------------------------
 double CalcRecoveryLot(double cumLoss)
   {
    double pv = PipValuePerLot();
-   if(pv <= 0 || TakeProfit_Pips <= 0) return nextLot; // fallback ke martingale biasa
-   double target = RecoveryTargetPips * pv * InitialLot;        // target profit siklus (uang)
-   double lot    = (cumLoss + target) / (TakeProfit_Pips * pv); // lot agar TP menutup rugi + target
-   PrintFormat("Recovery riil: rugi %.2f + target %.2f -> lot %.3f (martingale x%.1f = %.3f)",
+   if(pv <= 0 || TakeProfit_Pips <= 0)
+      return nextLot; // fallback ke martingale biasa
+   double target = RecoveryTargetPips * pv * InitialLot;
+   double lot = (cumLoss + target) / (TakeProfit_Pips * pv);
+   PrintFormat("Recovery riil: rugi %.2f + target %.2f"
+               + " -> lot %.3f (x%.1f = %.3f)",
                cumLoss, target, lot, LotMultiplier, nextLot);
    return lot;
   }
 
-//+------------------------------------------------------------------+
-//| Statistik histori (sejak historyFrom)                             |
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// UpdateTradeStats: hitung statistik dari histori
+// sejak historyFrom, sekaligus log CSV deal baru.
+//----------------------------------------------------
 void UpdateTradeStats()
   {
-   statTotalTrades = 0; statWins = 0; statLosses = 0; statTotalProfit = 0;
-   statTradesToday = 0; statProfitToday = 0; statLastTrade = "-";
-   datetime todayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+   statTotalTrades = 0; statWins = 0; statLosses = 0;
+   statTotalProfit = 0; statTradesToday = 0;
+   statProfitToday = 0; statLastTrade = "-";
+   datetime todayStart =
+      StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
 
    HistorySelect(historyFrom, TimeCurrent());
    int totalDeals = HistoryDealsTotal();
@@ -748,33 +1147,51 @@ void UpdateTradeStats()
      {
       ulong d = HistoryDealGetTicket(i);
       if(d == 0) continue;
-      if(HistoryDealGetString(d, DEAL_SYMBOL) != _Symbol || HistoryDealGetInteger(d, DEAL_MAGIC) != MagicNumber) continue;
-      if(HistoryDealGetInteger(d, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+      if(!IsOwnDeal(d)) continue;
+      if(HistoryDealGetInteger(d, DEAL_ENTRY)
+         != DEAL_ENTRY_OUT) continue;
 
-      double net = HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_SWAP) + HistoryDealGetDouble(d, DEAL_COMMISSION);
+      double net  = DealNet(d);
       long reason = HistoryDealGetInteger(d, DEAL_REASON);
-      datetime t = (datetime)HistoryDealGetInteger(d, DEAL_TIME);
-      bool isWin = (reason == DEAL_REASON_TP) ? true : (reason == DEAL_REASON_SL) ? false : (net > 0);
+      datetime t  =
+         (datetime)HistoryDealGetInteger(d, DEAL_TIME);
+      bool isWin  = DealIsWin(reason, net);
 
-      statTotalTrades++; statTotalProfit += net;
+      statTotalTrades++;
+      statTotalProfit += net;
       if(isWin) statWins++; else statLosses++;
-      if(t >= todayStart) { statTradesToday++; statProfitToday += net; }
+      if(t >= todayStart)
+        {
+         statTradesToday++;
+         statProfitToday += net;
+        }
 
+      // Deal SELL keluar = posisi BUY ditutup
       long dealType = HistoryDealGetInteger(d, DEAL_TYPE);
-      string dirText = (dealType == DEAL_TYPE_SELL) ? "BUY" : "SELL";
-      statLastTrade = StringFormat("%s %.2f lot, %s %.2f (%s)", dirText, HistoryDealGetDouble(d, DEAL_VOLUME),
-                                   isWin ? "WIN" : "LOSS", net, TimeToString(t, TIME_DATE|TIME_MINUTES));
+      string dirText = (dealType == DEAL_TYPE_SELL)
+                       ? "BUY" : "SELL";
+      double vol = HistoryDealGetDouble(d, DEAL_VOLUME);
+      statLastTrade = StringFormat("%s %.2f lot, %s %.2f (%s)"
+                         , dirText, vol,
+                         isWin ? "WIN" : "LOSS", net,
+                         TimeToString(t, TIME_DATE|TIME_MINUTES));
 
       // Log CSV untuk deal yang belum dicatat
       if(d > lastLoggedDeal)
         {
-         string reasonTxt = (reason == DEAL_REASON_TP) ? "TP" : (reason == DEAL_REASON_SL) ? "SL" : "CLOSE";
-         LogCSV(isWin ? "WIN" : "LOSS", HistoryDealGetDouble(d, DEAL_VOLUME), net, lossStreak, dirText + " " + reasonTxt);
-         if(!isWin && net < cycleWorstLoss) cycleWorstLoss = net;
+         string reasonTxt =
+            (reason == DEAL_REASON_TP) ? "TP" :
+            (reason == DEAL_REASON_SL) ? "SL" : "CLOSE";
+         LogCSV(isWin ? "WIN" : "LOSS", vol,
+                net, lossStreak, dirText + " " + reasonTxt);
+         if(!isWin && net < cycleWorstLoss)
+            cycleWorstLoss = net;
          if(isWin && prevLossStreak > 0)
            {
-            LogCSV("CYCLE_END", cycleMaxLot, net, prevLossStreak + 1,
-                   StringFormat("rugi terdalam %.2f", cycleWorstLoss));
+            LogCSV("CYCLE_END", cycleMaxLot, net,
+                   prevLossStreak + 1,
+                   StringFormat("rugi terdalam %.2f",
+                                cycleWorstLoss));
             cycleMaxLot = 0; cycleWorstLoss = 0;
            }
          lastLoggedDeal = d;
@@ -782,209 +1199,351 @@ void UpdateTradeStats()
      }
   }
 
-//+------------------------------------------------------------------+
-//| Log CSV: MQL5\Files\SARM_<simbol>_<magic>.csv                     |
-//+------------------------------------------------------------------+
-void LogCSV(string evt, double lot, double net, int step, string note)
+//----------------------------------------------------
+// IsOwnDeal: deal milik EA ini (simbol + magic)?
+//----------------------------------------------------
+bool IsOwnDeal(ulong d)
+  {
+   if(HistoryDealGetString(d, DEAL_SYMBOL) != _Symbol)
+      return false;
+   return HistoryDealGetInteger(d, DEAL_MAGIC) == MagicNumber;
+  }
+
+//----------------------------------------------------
+// DealNet: profit bersih deal (profit+swap+komisi).
+//----------------------------------------------------
+double DealNet(ulong d)
+  {
+   return HistoryDealGetDouble(d, DEAL_PROFIT)
+          + HistoryDealGetDouble(d, DEAL_SWAP)
+          + HistoryDealGetDouble(d, DEAL_COMMISSION);
+  }
+
+//----------------------------------------------------
+// DealIsWin: TP = win, SL = loss, lainnya lihat net.
+//----------------------------------------------------
+bool DealIsWin(long reason, double net)
+  {
+   if(reason == DEAL_REASON_TP) return true;
+   if(reason == DEAL_REASON_SL) return false;
+   return (net > 0);
+  }
+
+//----------------------------------------------------
+// LogCSV: tulis baris ke MQL5\Files\SARM_<sim>_<magic>.csv
+//----------------------------------------------------
+void LogCSV(string evt, double lot, double net,
+            int step, string note)
   {
    if(!LogToCSV) return;
-   string fname = "SARM_" + _Symbol + "_" + IntegerToString((int)MagicNumber) + ".csv";
+   string fname = "SARM_" + _Symbol + "_"
+                  + IntegerToString((int)MagicNumber)
+                  + ".csv";
    bool isNew = !FileIsExist(fname);
-   int h = FileOpen(fname, FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI);
-   if(h == INVALID_HANDLE) { Print("Gagal buka file log: ", GetLastError()); return; }
+   int h = FileOpen(fname,
+                    FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI);
+   if(h == INVALID_HANDLE)
+     {
+      Print("Gagal buka log: ", GetLastError());
+      return;
+     }
    FileSeek(h, 0, SEEK_END);
-   if(isNew) FileWrite(h, "waktu;event;lot;net;step;balance;equity;catatan");
-   FileWrite(h, StringFormat("%s;%s;%.3f;%.2f;%d;%.2f;%.2f;%s",
-                             TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), evt, lot, net, step,
-                             AccountInfoDouble(ACCOUNT_BALANCE), AccountInfoDouble(ACCOUNT_EQUITY), note));
+   if(isNew)
+      FileWrite(h, "waktu;event;lot;net;step;"
+                   + "balance;equity;catatan");
+   string now = TimeToString(TimeCurrent(),
+                             TIME_DATE|TIME_SECONDS);
+   FileWrite(h, StringFormat("%s;%s;%.3f;%.2f;%d;%.2f;%.2f;%s"
+                , now, evt, lot, net, step,
+                AccountInfoDouble(ACCOUNT_BALANCE),
+                AccountInfoDouble(ACCOUNT_EQUITY), note));
    FileClose(h);
   }
 
-//+------------------------------------------------------------------+
-//| Notifikasi push (throttle 60 detik)                               |
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// Notify: push notification, maks 1x per 60 detik.
+//----------------------------------------------------
 void Notify(string msg)
   {
    if(!UsePushNotify) return;
    if(TimeCurrent() - lastNotifyTime < 60) return;
    if(!SendNotification(msg))
-      Print("Notifikasi gagal (cek MetaQuotes ID di Tools > Options > Notifications): ", GetLastError());
+      Print("Notifikasi gagal (cek MetaQuotes ID): ",
+            GetLastError());
    lastNotifyTime = TimeCurrent();
   }
 
-//+------------------------------------------------------------------+
-//| Tampilan Comment                                                  |
-//+------------------------------------------------------------------+
+//====================================================
+// 9. PANEL CHART
+//====================================================
+
+//----------------------------------------------------
+// UpdateChartComment: tampilkan status di chart.
+//----------------------------------------------------
 void UpdateChartComment()
   {
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double spreadPoints = (ask - bid) / _Point;
-   string currency = AccountInfoString(ACCOUNT_CURRENCY);
+   double spreadPips = (ask - bid) / pipsToPoints;
+   string cur = AccountInfoString(ACCOUNT_CURRENCY);
 
-   int posCount = 0; double posProfit = 0; string posInfo = "-"; double posSL = 0, posTP = 0; datetime posTime = 0;
+   // Info posisi terbuka milik EA
+   int posCount = 0;
+   double posProfit = 0, posSL = 0, posTP = 0;
+   string posInfo = "-";
+   datetime posTime = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
-        {
-         posCount++;
-         posProfit += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-         posInfo = StringFormat("%s %.2f lot @ %s",
-                                (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? "BUY" : "SELL",
-                                PositionGetDouble(POSITION_VOLUME),
-                                DoubleToString(PositionGetDouble(POSITION_PRICE_OPEN), _Digits));
-         posSL = PositionGetDouble(POSITION_SL); posTP = PositionGetDouble(POSITION_TP);
-         posTime = (datetime)PositionGetInteger(POSITION_TIME);
-        }
+      if(!IsOwnPosition()) continue;
+      posCount++;
+      posProfit += PositionGetDouble(POSITION_PROFIT)
+                   + PositionGetDouble(POSITION_SWAP);
+      bool isBuy = (PositionGetInteger(POSITION_TYPE)
+                    == POSITION_TYPE_BUY);
+      double openP = PositionGetDouble(POSITION_PRICE_OPEN);
+      posInfo = StringFormat("%s %.2f lot @ %s",
+                             isBuy ? "BUY" : "SELL",
+                             PositionGetDouble(POSITION_VOLUME),
+                             DoubleToString(openP, _Digits));
+      posSL = PositionGetDouble(POSITION_SL);
+      posTP = PositionGetDouble(POSITION_TP);
+      posTime = (datetime)PositionGetInteger(POSITION_TIME);
      }
 
-   string adxInfo = UseADXFilter ? StringFormat("%.1f (ambang %.1f)", lastADXValue, ADX_Threshold) : "OFF";
+   // Info ADX
+   string adxInfo = UseADXFilter
+      ? StringFormat("%.1f (ambang %.1f)",
+                     lastADXValue, ADX_Threshold)
+      : "OFF";
+
+   // Info UT Bot
    string utbotInfo = "OFF";
    if(UseUTBotSignal)
      {
-      string trend = (utbotTrendDir > 0) ? "trend BUY" : (utbotTrendDir < 0) ? "trend SELL" : "warm-up";
+      string trend = (utbotTrendDir > 0) ? "trend BUY" :
+                     (utbotTrendDir < 0) ? "trend SELL" :
+                     "warm-up";
       if(utbotSignalDir != 0)
-         utbotInfo = StringFormat("SINYAL %s (%d bar lagi) | %s", utbotSignalDir > 0 ? "BUY" : "SELL", utbotSignalBarsLeft, trend);
+         utbotInfo = StringFormat("SINYAL %s (%d bar) | %s",
+                        utbotSignalDir > 0 ? "BUY" : "SELL",
+                        utbotSignalBarsLeft, trend);
       else
-         utbotInfo = StringFormat("menunggu (TS %s) | %s", DoubleToString(utbotTS, _Digits), trend);
+         utbotInfo = StringFormat("menunggu (TS %s) | %s",
+                        DoubleToString(utbotTS, _Digits),
+                        trend);
      }
 
-   double winRate = (statTotalTrades > 0) ? (100.0 * statWins / statTotalTrades) : 0;
-   bool terminalTrade = (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
-   bool eaTrade = (bool)MQLInfoInteger(MQL_TRADE_ALLOWED);
-   string tradeAllowed = (terminalTrade && eaTrade) ? "AKTIF" :
-                         (!terminalTrade ? "NONAKTIF (AutoTrading terminal OFF)" : "NONAKTIF (Allow Algo Trading EA OFF)");
-   double sessionPL = AccountInfoDouble(ACCOUNT_EQUITY) - startBalance;
-   double ddFloor = (MaxDrawdownPct > 0) ? startBalance * (1.0 - MaxDrawdownPct / 100.0) : 0;
+   // Status autotrading
+   bool termTrade =
+      (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
+   bool eaTrade   = (bool)MQLInfoInteger(MQL_TRADE_ALLOWED);
+   string tradeAllowed = (termTrade && eaTrade) ? "AKTIF" :
+      (!termTrade ? "NONAKTIF (AutoTrading OFF)"
+                  : "NONAKTIF (Allow Algo Trading OFF)");
 
-   string text = "\n";
-   text += "=== SAR MARTINGALE v1.34 XAUUSD Exness Cent ===\n";
-   text += StringFormat("%s chart %s | sinyal %s | Server: %s\n", _Symbol, EnumToString(_Period),
-                        EnumToString(UTBot_Timeframe), TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
-   text += "AutoTrading : " + tradeAllowed + "\n";
-   text += "Status      : " + eaStatus + "\n";
-   text += "---------------------------------------------\n";
-   text += StringFormat("Bid/Ask     : %s / %s\n", DoubleToString(bid, _Digits), DoubleToString(ask, _Digits));
-   text += StringFormat("Spread      : %.1f pips (maks %.1f) | 1 pip = %s\n", spreadPoints * _Point / pipsToPoints, MaxSpread_Pips, DoubleToString(pipsToPoints, _Digits));
-   text += "UT Bot      : " + utbotInfo + "\n";
-   text += "ADX         : " + adxInfo + "\n";
-   text += "---------------------------------------------\n";
+   double winRate = (statTotalTrades > 0)
+      ? (100.0 * statWins / statTotalTrades) : 0;
+   double sessionPL = AccountInfoDouble(ACCOUNT_EQUITY)
+                      - startBalance;
+   double ddFloor = (MaxDrawdownPct > 0)
+      ? startBalance * (1.0 - MaxDrawdownPct / 100.0) : 0;
+
+   // Susun teks panel
+   string t = "\n";
+   t += "=== SAR MARTINGALE v1.36 XAUUSD ===\n";
+   t += StringFormat("%s chart %s | sinyal %s\n",
+                     _Symbol, EnumToString(_Period),
+                     EnumToString(UTBot_Timeframe));
+   t += "Server      : "
+        + TimeToString(TimeCurrent(),
+                       TIME_DATE|TIME_SECONDS) + "\n";
+   t += "AutoTrading : " + tradeAllowed + "\n";
+   t += "Status      : " + eaStatus + "\n";
+   t += "-----------------------------------\n";
+   t += StringFormat("Bid/Ask     : %s / %s\n",
+                     DoubleToString(bid, _Digits),
+                     DoubleToString(ask, _Digits));
+   t += StringFormat("Spread      : %.1f pips (maks %.1f)\n",
+                     spreadPips, MaxSpread_Pips);
+   t += "UT Bot      : " + utbotInfo + "\n";
+   t += "ADX         : " + adxInfo + "\n";
+   t += "-----------------------------------\n";
    if(posCount > 0)
      {
-      text += "Posisi      : " + posInfo + "\n";
-      text += StringFormat("SL / TP     : %s / %s\n", DoubleToString(posSL, _Digits), DoubleToString(posTP, _Digits));
-      text += StringFormat("Floating P/L: %.2f %s | umur %.1f hari%s\n", posProfit, currency,
-                           (TimeCurrent() - posTime) / 86400.0,
-                           (MaxPositionDays > 0) ? StringFormat(" (maks %d)", MaxPositionDays) : "");
+      t += "Posisi      : " + posInfo + "\n";
+      t += StringFormat("SL / TP     : %s / %s\n",
+                        DoubleToString(posSL, _Digits),
+                        DoubleToString(posTP, _Digits));
+      double umur = (TimeCurrent() - posTime) / 86400.0;
+      string maks = (MaxPositionDays > 0)
+         ? StringFormat(" (maks %d)", MaxPositionDays) : "";
+      t += StringFormat("Floating    : %.2f %s\n",
+                        posProfit, cur);
+      t += StringFormat("Umur posisi : %.1f hari%s\n",
+                        umur, maks);
      }
    else
      {
-      string dirText = (waitTrendSignal && UseUTBotSignal) ? "ikut sinyal UT Bot" : ((nextDirection == ORDER_TYPE_BUY) ? "BUY" : "SELL");
-      text += StringFormat("Entry next  : %s, %.2f lot (%s, plafon %.2f)\n", dirText, nextLot,
-                           UseLossBasedRecovery ? "recovery riil" : StringFormat("x%.1f", LotMultiplier),
-                           (MaxLot > 0) ? MaxLot : SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
+      string dirText;
+      if(waitTrendSignal && UseUTBotSignal)
+         dirText = "ikut sinyal UT Bot";
+      else
+        {
+         dirText = (nextDirection == ORDER_TYPE_BUY)
+                   ? "BUY" : "SELL";
+         if(EntryAfterWinNoSignal && lastWasWin)
+            dirText += " (lanjut pasca WIN)";
+        }
+      t += StringFormat("Entry next  : %s, %.2f lot\n",
+                        dirText, nextLot);
+      string mode = UseLossBasedRecovery ? "recovery riil"
+                    : StringFormat("x%.1f", LotMultiplier);
+      double cap = (MaxLot > 0) ? MaxLot
+         : SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+      t += StringFormat("Mode lot    : %s, plafon %.2f\n",
+                        mode, cap);
      }
-   text += StringFormat("Step        : %d dari %s%s | rugi akumulasi %.2f\n", lossStreak,
-                        (MaxMartingaleStep > 0) ? IntegerToString(MaxMartingaleStep) : "tanpa batas",
-                        (MaxMartingaleStep > 0 && lossStreak >= MaxMartingaleStep) ? " (tunggu sinyal)" : "", cumLossSinceWin);
-   text += "Trade akhir : " + statLastTrade + "\n";
-   text += "---------------------------------------------\n";
-   text += StringFormat("Hari ini    : %d trade | P/L %.2f %s%s\n", statTradesToday, statProfitToday, currency,
-                        (DailyLossLimit > 0) ? StringFormat(" (batas -%.2f)", DailyLossLimit) : "");
-   text += StringFormat("Total       : %d trade (W:%d / L:%d, WR %.1f%%)\n", statTotalTrades, statWins, statLosses, winRate);
-   text += StringFormat("Total P/L   : %.2f %s | Sesi: %+.2f %s\n", statTotalProfit, currency, sessionPL, currency);
-   text += "---------------------------------------------\n";
-   text += StringFormat("Balance     : %.2f | Equity: %.2f%s\n", AccountInfoDouble(ACCOUNT_BALANCE), AccountInfoDouble(ACCOUNT_EQUITY),
-                        (ddFloor > 0) ? StringFormat(" | Stop @ %.2f", ddFloor) : "");
-   text += StringFormat("Free Margin : %.2f | Margin Lvl: %.0f%%\n", AccountInfoDouble(ACCOUNT_MARGIN_FREE), AccountInfoDouble(ACCOUNT_MARGIN_LEVEL));
-   Comment(text);
+   string stepMax = (MaxMartingaleStep > 0)
+      ? IntegerToString(MaxMartingaleStep) : "tanpa batas";
+   string stepNote = (MaxMartingaleStep > 0
+      && lossStreak >= MaxMartingaleStep)
+      ? " (tunggu sinyal)" : "";
+   t += StringFormat("Step        : %d dari %s%s\n",
+                     lossStreak, stepMax, stepNote);
+   t += StringFormat("Rugi akum.  : %.2f %s\n",
+                     cumLossSinceWin, cur);
+   t += "Trade akhir : " + statLastTrade + "\n";
+   t += "-----------------------------------\n";
+   t += StringFormat("Hari ini    : %d trade | P/L %.2f%s\n",
+           statTradesToday, statProfitToday,
+           (DailyLossLimit > 0)
+              ? StringFormat(" (batas -%.2f)", DailyLossLimit)
+              : "");
+   t += StringFormat("Total       : %d trade\n", statTotalTrades);
+   t += StringFormat("Win/Loss    : %d / %d (WR %.1f%%)\n",
+                     statWins, statLosses, winRate);
+   t += StringFormat("Total P/L   : %.2f | Sesi: %+.2f %s\n",
+                     statTotalProfit, sessionPL, cur);
+   t += "-----------------------------------\n";
+   t += StringFormat("Balance     : %.2f | Equity %.2f\n",
+                     AccountInfoDouble(ACCOUNT_BALANCE),
+                     AccountInfoDouble(ACCOUNT_EQUITY));
+   if(ddFloor > 0)
+      t += StringFormat("Equity stop : %.2f\n", ddFloor);
+   t += StringFormat("Free margin : %.2f | Lvl %.0f%%\n",
+                     AccountInfoDouble(ACCOUNT_MARGIN_FREE),
+                     AccountInfoDouble(ACCOUNT_MARGIN_LEVEL));
+   Comment(t);
   }
 
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// IsTrending: ADX bar terakhir >= ambang?
+//----------------------------------------------------
 bool IsTrending()
   {
    double adx[1];
-   if(CopyBuffer(adxHandle, MAIN_LINE, 1, 1, adx) < 1) { lastADXValue = 0; return false; }
+   if(CopyBuffer(adxHandle, MAIN_LINE, 1, 1, adx) < 1)
+     {
+      lastADXValue = 0;
+      return false;
+     }
    lastADXValue = adx[0];
    return (adx[0] >= ADX_Threshold);
   }
 
-//+------------------------------------------------------------------+
-int CountOpenPositions()
-  {
-   int count = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == MagicNumber) count++;
-     }
-   return count;
-  }
+//====================================================
+// 10. HISTORI DEAL & NORMALISASI LOT
+//====================================================
 
-//+------------------------------------------------------------------+
-//| Ekstrak arah, lot, loss beruntun, dan akumulasi rugi sejak win    |
-//+------------------------------------------------------------------+
-bool GetLastTradeInfo(int &next_dir, double &next_lot, int &loss_streak, double &cum_loss)
+//----------------------------------------------------
+// GetLastTradeInfo: baca histori dari deal terbaru.
+// Mengisi arah & lot berikut, loss beruntun, dan
+// akumulasi rugi sejak win terakhir.
+// Return true jika ada deal keluar (WIN atau LOSS).
+//----------------------------------------------------
+bool GetLastTradeInfo(int &next_dir, double &next_lot,
+                      int &loss_streak, double &cum_loss)
   {
    HistorySelect(historyFrom, TimeCurrent());
    int totalDeals = HistoryDealsTotal();
    bool foundLast = false;
-   loss_streak = 0; cum_loss = 0;
+   loss_streak = 0;
+   cum_loss = 0;
 
+   // Loop dari deal terbaru ke terlama
    for(int i = totalDeals - 1; i >= 0; i--)
      {
       ulong d = HistoryDealGetTicket(i);
       if(d == 0) continue;
-      if(HistoryDealGetString(d, DEAL_SYMBOL) != _Symbol || HistoryDealGetInteger(d, DEAL_MAGIC) != MagicNumber) continue;
-      if(HistoryDealGetInteger(d, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+      if(!IsOwnDeal(d)) continue;
+      if(HistoryDealGetInteger(d, DEAL_ENTRY)
+         != DEAL_ENTRY_OUT) continue;
 
       long reason = HistoryDealGetInteger(d, DEAL_REASON);
-      double net = HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_SWAP) + HistoryDealGetDouble(d, DEAL_COMMISSION);
-      bool isWin = (reason == DEAL_REASON_TP) ? true : (reason == DEAL_REASON_SL) ? false : (net > 0);
+      double net  = DealNet(d);
+      bool isWin  = DealIsWin(reason, net);
 
       if(!foundLast)
         {
-         long   dealType = HistoryDealGetInteger(d, DEAL_TYPE);
-         double lastLot  = HistoryDealGetDouble(d, DEAL_VOLUME);
-         int lastPositionType = (dealType == DEAL_TYPE_SELL) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+         // Deal terbaru menentukan arah & lot berikut
+         long dealType  = HistoryDealGetInteger(d, DEAL_TYPE);
+         double lastLot =
+            HistoryDealGetDouble(d, DEAL_VOLUME);
+         int lastPosType = (dealType == DEAL_TYPE_SELL)
+                           ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
          if(isWin)
            {
-            next_dir = lastPositionType; next_lot = InitialLot; loss_streak = 0;
+            // WIN: arah sama, lot awal
+            next_dir    = lastPosType;
+            next_lot    = InitialLot;
+            loss_streak = 0;
             return true;
            }
-         next_dir = (lastPositionType == ORDER_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
-         next_lot = lastLot * LotMultiplier;
-         loss_streak = 1; cum_loss = -net; foundLast = true;
+         // LOSS: balik arah, lot dikali
+         next_dir = (lastPosType == ORDER_TYPE_BUY)
+                    ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+         next_lot    = lastLot * LotMultiplier;
+         loss_streak = 1;
+         cum_loss    = -net;
+         foundLast   = true;
         }
       else
         {
+         // Hitung mundur loss beruntun sampai win
          if(isWin) break;
-         loss_streak++; cum_loss += -net;
+         loss_streak++;
+         cum_loss += -net;
         }
      }
    return foundLast;
   }
 
-//+------------------------------------------------------------------+
-//| Normalisasi lot: step broker, min/max broker, plafon MaxLot       |
-//+------------------------------------------------------------------+
+//----------------------------------------------------
+// NormalizeLot: sesuaikan dengan step/min/max broker
+// dan plafon MaxLot.
+//----------------------------------------------------
 double NormalizeLot(double lot)
   {
-   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double cap     = (MaxLot > 0) ? MathMin(MaxLot, maxLot) : maxLot;
+   double minLot  =
+      SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot  =
+      SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double stepLot =
+      SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double cap = (MaxLot > 0)
+                ? MathMin(MaxLot, maxLot) : maxLot;
 
    if(lot > cap)
      {
-      PrintFormat("PERINGATAN: Lot %.2f dipotong ke plafon %.2f. Recovery martingale tidak lagi penuh.", lot, cap);
+      PrintFormat("PERINGATAN: lot %.2f dipotong ke %.2f."
+                  + " Recovery tidak lagi penuh.", lot, cap);
       lot = cap;
      }
    if(lot < minLot) lot = minLot;
-   if(stepLot > 0) lot = MathFloor(lot / stepLot + 1e-9) * stepLot;
+   if(stepLot > 0)
+      lot = MathFloor(lot / stepLot + 1e-9) * stepLot;
    return NormalizeDouble(lot, 2);
   }
-//+------------------------------------------------------------------+
+//+----------------------------------------------------+
