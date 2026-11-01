@@ -1,13 +1,13 @@
-//+--------------------------------------------------+
-//| ZoneRecoveryEA.mq5                               |
-//| Zone Recovery Hedging EA untuk XAUUSD            |
-//| Akun harus bertipe HEDGING                       |
-//| PERINGATAN: TANPA STOP LOSS,                     |
-//| TANPA CUT-LOSS PER SIKLUS                        |
-//+--------------------------------------------------+
+//+----------------------------------------------------+
+//| ZoneRecoveryEA.mq5                                 |
+//| Zone Recovery Hedging EA untuk XAUUSD              |
+//| Akun harus bertipe HEDGING                         |
+//| PERINGATAN: TANPA STOP LOSS,                       |
+//| TANPA CUT-LOSS PER SIKLUS                          |
+//+----------------------------------------------------+
 //
 // ALUR KERJA EA
-// ----------------------------------------------------
+// ------------------------------------------------------
 // 1. MENUNGGU
 //    Tidak ada posisi/pending EA.
 //    Jika jam WIB masuk jendela, spread OK, ATR OK:
@@ -35,7 +35,8 @@
 //    Berhenti jika MaxLevel tercapai / deret habis.
 //
 // 4. TARGET
-//    Tiap tick: Bid >= TP atas atau Ask <= TP bawah
+//    a) Tiap tick: Bid >= TP atas atau Ask <= TP bawah
+//    b) Atau: floating P/L keranjang >= TPBEP (USD)
 //    -> hapus semua pending, tutup semua posisi
 //    (close-all dari kode), reset, kembali ke 1.
 //
@@ -49,12 +50,12 @@
 //    horizontal: zona (oranye), TP (hijau).
 //
 // TIDAK ADA STOP LOSS. Siklus berakhir hanya dengan
-// TP, berhenti di MaxLevel (menggantung), atau
-// margin call.
+// TP zona, TP BEP, berhenti di MaxLevel (menggantung),
+// atau margin call.
 // ------------------------------------------------------
 
 #property copyright "Zone Recovery EA"
-#property version   "1.01"
+#property version   "1.02"
 #property description "Zone Recovery hedging XAUUSD."
 #property description "TANPA STOP LOSS. Risiko tinggi."
 
@@ -80,6 +81,10 @@ input double LebarZona = 3.1; // Lebar zona
 input double JarakTP = 5.0; // Jarak TP
 // Level maksimum, 0 = tanpa batas
 input int MaxLevel = 0; // Max level
+// true = tutup semua jika floating P/L >= TPBEP
+input bool GunakanTPBEP = true; // Pakai TP BEP
+// Target profit keranjang dalam mata uang akun (USD)
+input double TPBEP = 4.0; // TP BEP (USD)
 
 input group "--- Jendela Waktu (WIB) ---"
 // Jam mulai entry awal, WIB. Kosong = 24 jam
@@ -897,14 +902,29 @@ void ManageCycle()
    if(!g_cycleActive) StartCycle();
    g_level = nPos - 1;
 
-   // Cek target -> close-all dari kode
+   // Cek target zona -> close-all dari kode
    if(bid >= g_tpUpper || ask <= g_tpLower)
    {
-      PrintFormat("TARGET: Bid %.2f Ask %.2f -> close all",
+      PrintFormat("TARGET ZONA: Bid %.2f Ask %.2f -> close all",
                   bid, ask);
       g_closing = true;
       CloseAllAndDelete();
       return;
+   }
+
+   // Cek TP BEP: profit keranjang sudah >= TPBEP
+   if(GunakanTPBEP && TPBEP > 0)
+   {
+      double totalLot, floatPL, netLot;
+      GetBasketStats(totalLot, floatPL, netLot);
+      if(floatPL >= TPBEP)
+      {
+         PrintFormat("TP BEP: floating %.2f >= %.2f -> close all",
+                     floatPL, TPBEP);
+         g_closing = true;
+         CloseAllAndDelete();
+         return;
+      }
    }
 
    MaintainRecoveryPending();
@@ -960,6 +980,9 @@ void UpdateComment()
       s += StringFormat("TP atas: %.2f | TP bawah: %.2f "
                         "(jarak %.2f)\n",
                         g_tpUpper, g_tpLower, g_tpDist);
+      if(GunakanTPBEP)
+         s += StringFormat("TP BEP: %.2f USD (floating %.2f)\n",
+                           TPBEP, floatPL);
    }
    else
    {
@@ -1042,9 +1065,9 @@ int OnInit()
    RebuildState();
 
    PrintFormat("ZoneRecoveryEA siap. %d level, zona %.2f, "
-               "TP %.2f, MaxLevel %d",
+               "TP %.2f, MaxLevel %d, TPBEP %.2f",
                ArraySize(g_lots), LebarZona,
-               JarakTP, MaxLevel);
+               JarakTP, MaxLevel, TPBEP);
    return INIT_SUCCEEDED;
 }
 
